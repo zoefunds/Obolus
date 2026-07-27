@@ -1,0 +1,7 @@
+# Tooling for direct-mode contract tests + linting.
+# Exact package names/versions come from the GenLayer Studio/CLI install docs
+# for whatever GenLayer release this project targets — pin them here once
+# `pip install genlayer` (or your project's equivalent) is confirmed locally.
+pytest>=8.0
+genlayer
+gltest

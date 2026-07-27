@@ -1,0 +1,33 @@
+# Secrets — never commit
+.env
+.env.local
+.env.*.local
+
+# Dependencies
+node_modules/
+.venv*/
+
+# Build output
+frontend/dist/
+dist/
+
+# Vercel
+.vercel/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+artifacts/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+.claude/

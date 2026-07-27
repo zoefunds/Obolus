@@ -1,0 +1,24 @@
+{
+  "name": "obolus",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Obolus — a GenLayer-native inheritance escrow that releases funds only on consensus-verified evidence of death. Contract, deploy tooling, backend API, and frontend.",
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "scripts": {
+    "deploy": "node scripts/deploy.mjs",
+    "backend": "npm run dev --workspace backend",
+    "backend:prod": "pm2 start ecosystem.config.cjs",
+    "backend:prod:stop": "pm2 stop obolus-backend",
+    "backend:prod:logs": "pm2 logs obolus-backend",
+    "frontend": "npm run dev --workspace frontend",
+    "test:contract": "pytest tests/direct/ -v",
+    "lint:contract": "genvm-lint check contracts/verifiable_decease_escrow.py --json"
+  },
+  "devDependencies": {
+    "genlayer-js": "^1.1.8",
+    "pm2": "^5.4.2"
+  }
+}
