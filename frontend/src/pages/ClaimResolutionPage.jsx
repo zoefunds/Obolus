@@ -86,7 +86,7 @@ export default function ClaimResolutionPage() {
     setResolving(true);
     setError("");
     try {
-      await write(glClient, "resolve_claim", [Number(id), Math.floor(Date.now() / 1000)]);
+      await write(glClient, "resolve_claim", [Number(id)]);
       load();
     } catch (err) {
       setError(err.message);

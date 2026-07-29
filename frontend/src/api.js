@@ -24,7 +24,7 @@ export const api = {
   setBeneficiary: (id, newBeneficiary) => req(`/vaults/${id}/beneficiary`, { method: "POST", body: JSON.stringify({ newBeneficiary }) }),
 
   getClaim: (id) => req(`/claims/${id}`),
-  isResolvable: (id, nowTs) => req(`/claims/${id}/resolvable?nowTs=${nowTs}`),
+  isResolvable: (id) => req(`/claims/${id}/resolvable`),
   submitClaim: (vaultId, data) => req(`/vaults/${vaultId}/claims`, { method: "POST", body: JSON.stringify(data) }),
   contestClaim: (id, data) => req(`/claims/${id}/contest`, { method: "POST", body: JSON.stringify(data) }),
   resolveClaim: (id) => req(`/claims/${id}/resolve`, { method: "POST", body: JSON.stringify({}) }),

@@ -34,7 +34,7 @@ export default function SubmitClaimPage() {
       const receipt = await write(
         glClient,
         "submit_death_claim",
-        [Number(id), JSON.stringify(urlList), imageUrl, note, Math.floor(Date.now() / 1000)],
+        [Number(id), JSON.stringify(urlList), imageUrl, note],
         genToWei(bondGen)
       );
       const claimId = receipt?.data?.result;

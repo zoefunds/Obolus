@@ -1,6 +1,7 @@
 # v0.2.16
 # { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
 
+import datetime
 import json
 import re
 import typing
@@ -150,6 +151,16 @@ def _looks_like_image(data: bytes) -> bool:
         return False
     head = bytes(data[:12])
     return any(head.startswith(sig) for sig in _IMAGE_MAGIC_NUMBERS)
+
+
+def _chain_now_ts() -> int:
+    """The contest window's only legitimate clock: GenVM patches
+    datetime.now() to the network's consensus-agreed block time, which
+    every validator computes identically. It is never read from a
+    caller-supplied argument or calldata, so a claimant/contester cannot
+    spoof a now_ts to open or dodge a contest window — the prior design's
+    vulnerability."""
+    return int(datetime.datetime.now(datetime.timezone.utc).timestamp())
 
 
 def _coerce_address(value: typing.Any) -> Address:
@@ -537,7 +548,6 @@ class VerifiableDeceaseEscrow(gl.Contract):
         subject_aka_json: str,
         subject_birth_year: int,
         contest_window_seconds: int,
-        now_ts: int,
     ) -> int:
         """Create and fund a decease-escrow vault. Attach the GEN to be
         inherited as the call's value.
@@ -552,16 +562,15 @@ class VerifiableDeceaseEscrow(gl.Contract):
             contest_window_seconds: how long a submitted claim stays
                 contestable before resolution may run. Bounded to
                 [MIN_CONTEST_WINDOW_SECONDS, MAX_CONTEST_WINDOW_SECONDS].
-            now_ts: caller-supplied current unix time.
 
         Returns: the new vault id.
         """
         self._not_paused()
         sender = gl.message.sender_address
         deposit = int(gl.message.value)
+        now_ts = _chain_now_ts()
 
         _require(deposit > 0, "vault must be funded with GEN value")
-        _require(now_ts > 0, "now_ts must be a positive unix timestamp")
         beneficiary_addr = _coerce_address(beneficiary)
         _require(not _is_zero_address(beneficiary_addr), "beneficiary must not be the zero address")
         _require(beneficiary_addr != sender, "beneficiary must differ from the grantor")
@@ -641,7 +650,7 @@ class VerifiableDeceaseEscrow(gl.Contract):
         _ = old_addr
 
     @gl.public.write
-    def cancel_vault(self, vault_id: int, now_ts: int) -> None:
+    def cancel_vault(self, vault_id: int) -> None:
         """Grantor only, ACTIVE vaults only: cancel and reclaim the full
         balance. This is the vault's fund-recovery exit — a grantor who
         changes their mind, or funded the wrong vault, is never stuck,
@@ -652,7 +661,7 @@ class VerifiableDeceaseEscrow(gl.Contract):
         refund = int(vault.balance_wei)
         vault.balance_wei = u256(0)
         vault.status = u8(VAULT_CANCELLED)
-        vault.resolved_ts = u64(max(0, int(now_ts)))
+        vault.resolved_ts = u64(_chain_now_ts())
         self.total_escrowed_wei = u256(max(0, int(self.total_escrowed_wei) - refund))
         if refund > 0:
             self._credit_balance(vault.grantor, refund)
@@ -669,7 +678,6 @@ class VerifiableDeceaseEscrow(gl.Contract):
         evidence_urls_json: str,
         evidence_image_url: str,
         note: str,
-        now_ts: int,
     ) -> int:
         """Open a death claim against an ACTIVE vault. Anyone may submit —
         resolution is permissionless and evidence-driven, not identity-
@@ -685,14 +693,13 @@ class VerifiableDeceaseEscrow(gl.Contract):
                 a certificate or obituary, rendered as a screenshot during
                 resolution. "" for none.
             note: free-text context, e.g. relationship to the subject.
-            now_ts: caller-supplied current unix time.
 
         Returns: the new claim id.
         """
         self._not_paused()
         vault = self._get_vault(vault_id)
         _require(int(vault.status) == VAULT_ACTIVE, "vault does not have an open funding state for a new claim")
-        _require(now_ts > 0, "now_ts must be a positive unix timestamp")
+        now_ts = _chain_now_ts()
 
         bond = int(gl.message.value)
         _require(bond >= int(self.min_claimant_bond_wei), "claimant bond below minimum")
@@ -743,7 +750,6 @@ class VerifiableDeceaseEscrow(gl.Contract):
         claim_id: int,
         contest_urls_json: str,
         contest_image_url: str,
-        now_ts: int,
     ) -> None:
         """Submit counter-evidence against an OPEN claim before its contest
         deadline — e.g. a fresh, dated public appearance, or a "proof of
@@ -764,6 +770,7 @@ class VerifiableDeceaseEscrow(gl.Contract):
         self._not_paused()
         claim = self._get_claim(claim_id)
         _require(int(claim.status) in (CLAIM_OPEN, CLAIM_CONTESTED), "claim is not open for contest")
+        now_ts = _chain_now_ts()
         _require(now_ts <= int(claim.contest_deadline_ts), "contest window has closed")
 
         bond = int(gl.message.value)
@@ -1017,7 +1024,7 @@ Respond with ONLY a JSON object, no markdown, with exactly these keys:
     # ========================================================================
 
     @gl.public.write
-    def resolve_claim(self, claim_id: int, now_ts: int) -> dict:
+    def resolve_claim(self, claim_id: int) -> dict:
         """Run one resolution attempt on an OPEN or CONTESTED claim whose
         contest window has closed. Permissionless — anyone may call it once
         the deterministic timing gate passes; the outcome is entirely
@@ -1044,6 +1051,7 @@ Respond with ONLY a JSON object, no markdown, with exactly these keys:
         # must always remain resolvable, even while paused (see pause()).
         claim = self._get_claim(claim_id)
         _require(int(claim.status) in (CLAIM_OPEN, CLAIM_CONTESTED), "claim is not resolvable")
+        now_ts = _chain_now_ts()
         _require(now_ts >= int(claim.contest_deadline_ts), "contest window has not closed yet")
 
         vault = self._get_vault(int(claim.vault_id))
@@ -1234,14 +1242,15 @@ Respond with ONLY a JSON object, no markdown, with exactly these keys:
         return int(current) if current is not None else 0
 
     @gl.public.view
-    def is_resolvable(self, claim_id: int, now_ts: int) -> bool:
+    def is_resolvable(self, claim_id: int) -> bool:
         """Cheap deterministic pre-check a caller can run before spending
         gas on the expensive nondet resolve_claim round: is this claim even
-        past its contest window yet?"""
+        past its contest window yet? Uses the same trusted chain-time
+        source as resolve_claim itself, never a caller-supplied value."""
         claim = self._get_claim(claim_id)
         if int(claim.status) not in (CLAIM_OPEN, CLAIM_CONTESTED):
             return False
-        return int(now_ts) >= int(claim.contest_deadline_ts)
+        return _chain_now_ts() >= int(claim.contest_deadline_ts)
 
     @gl.public.view
     def get_platform_stats(self) -> dict:

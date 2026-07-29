@@ -35,7 +35,7 @@ vaultsRouter.get("/:id/claims", async (req, res, next) => {
 });
 
 // POST /vaults
-// body: { beneficiary, subjectName, subjectAkaJson, subjectBirthYear, contestWindowSeconds, nowTs, valueWei }
+// body: { beneficiary, subjectName, subjectAkaJson, subjectBirthYear, contestWindowSeconds, valueWei }
 vaultsRouter.post("/", async (req, res, next) => {
   try {
     const {
@@ -44,7 +44,6 @@ vaultsRouter.post("/", async (req, res, next) => {
       subjectAkaJson = "[]",
       subjectBirthYear = 0,
       contestWindowSeconds,
-      nowTs = Math.floor(Date.now() / 1000),
       valueWei,
     } = req.body;
 
@@ -54,7 +53,7 @@ vaultsRouter.post("/", async (req, res, next) => {
 
     const { txHash, receipt } = await writeMethod(
       "create_vault",
-      [beneficiary, subjectName, subjectAkaJson, Number(subjectBirthYear), Number(contestWindowSeconds), Number(nowTs)],
+      [beneficiary, subjectName, subjectAkaJson, Number(subjectBirthYear), Number(contestWindowSeconds)],
       BigInt(valueWei)
     );
     await invalidate("vault_count");
@@ -90,11 +89,10 @@ vaultsRouter.post("/:id/beneficiary", async (req, res, next) => {
   }
 });
 
-// POST /vaults/:id/cancel  body: { nowTs }
+// POST /vaults/:id/cancel
 vaultsRouter.post("/:id/cancel", async (req, res, next) => {
   try {
-    const nowTs = req.body?.nowTs ?? Math.floor(Date.now() / 1000);
-    const result = await writeMethod("cancel_vault", [Number(req.params.id), Number(nowTs)]);
+    const result = await writeMethod("cancel_vault", [Number(req.params.id)]);
     await invalidate(`vault:${req.params.id}`);
     res.json(result);
   } catch (err) {

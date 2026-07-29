@@ -49,7 +49,7 @@ export default function CreateVaultPage() {
       const receipt = await write(
         glClient,
         "create_vault",
-        [beneficiary, subjectName, JSON.stringify(akas), birthYear ? Number(birthYear) : 0, Math.round(Number(windowDays) * 86400), Math.floor(Date.now() / 1000)],
+        [beneficiary, subjectName, JSON.stringify(akas), birthYear ? Number(birthYear) : 0, Math.round(Number(windowDays) * 86400)],
         genToWei(amountGen)
       );
       const vaultId = receipt?.data?.result;

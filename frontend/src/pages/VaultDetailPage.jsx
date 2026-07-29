@@ -94,7 +94,7 @@ function GrantorControls({ vault, glClient, onChanged }) {
     setBusy(true);
     setError("");
     try {
-      await write(glClient, "cancel_vault", [vault.id, Math.floor(Date.now() / 1000)]);
+      await write(glClient, "cancel_vault", [vault.id]);
       onChanged();
     } catch (err) {
       setError(err.message);
@@ -171,7 +171,7 @@ function ContestForm({ claimId, glClient, onSubmitted }) {
       await write(
         glClient,
         "contest_claim",
-        [claimId, JSON.stringify(urlList), imageUrl, Math.floor(Date.now() / 1000)],
+        [claimId, JSON.stringify(urlList), imageUrl],
         genToWei(bondGen)
       );
       onSubmitted();
@@ -248,7 +248,7 @@ export default function VaultDetailPage() {
     setResolving(true);
     setError("");
     try {
-      await write(glClient, "resolve_claim", [activeClaim.id, Math.floor(Date.now() / 1000)]);
+      await write(glClient, "resolve_claim", [activeClaim.id]);
       load();
       navigate(`/claims/${activeClaim.id}`);
     } catch (err) {

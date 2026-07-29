@@ -51,12 +51,11 @@ def _reset_known_contract():
 
 
 def warp_to(direct_vm, iso: str) -> None:
-    """Advance the VM clock everywhere a contract can read it. Not used by
-    this contract today (VerifiableDeceaseEscrow takes now_ts as an
-    explicit deterministic parameter rather than reading gl.message.raw
-    datetime — see docs/CONTRACT.md, "Why now_ts is a parameter"), but kept
-    available for any future time-reading extension so a warp() call is
-    never silently vacuous.
+    """Advance the VM clock everywhere a contract can read it.
+    VerifiableDeceaseEscrow derives all of its now_ts values from
+    datetime.datetime.now() (patched by VMContext.activate() to read the
+    VM's warped clock) rather than trusting a caller-supplied timestamp,
+    so this is how tests control contest-window boundaries.
     """
     direct_vm.warp(iso)
     gl = sys.modules.get("genlayer.gl")

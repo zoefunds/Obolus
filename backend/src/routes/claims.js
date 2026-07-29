@@ -14,11 +14,10 @@ claimsRouter.get("/:id", async (req, res, next) => {
   }
 });
 
-// GET /claims/:id/resolvable?nowTs=...
+// GET /claims/:id/resolvable
 claimsRouter.get("/:id/resolvable", async (req, res, next) => {
   try {
-    const nowTs = req.query.nowTs ? Number(req.query.nowTs) : Math.floor(Date.now() / 1000);
-    const resolvable = await readMethod("is_resolvable", [Number(req.params.id), nowTs]);
+    const resolvable = await readMethod("is_resolvable", [Number(req.params.id)]);
     res.json({ resolvable });
   } catch (err) {
     next(err);
@@ -26,15 +25,15 @@ claimsRouter.get("/:id/resolvable", async (req, res, next) => {
 });
 
 // POST /vaults/:vaultId/claims
-// body: { evidenceUrlsJson, evidenceImageUrl, note, nowTs, valueWei }
+// body: { evidenceUrlsJson, evidenceImageUrl, note, valueWei }
 export const submitClaim = async (req, res, next) => {
   try {
-    const { evidenceUrlsJson, evidenceImageUrl = "", note = "", nowTs = Math.floor(Date.now() / 1000), valueWei = "0" } = req.body;
+    const { evidenceUrlsJson, evidenceImageUrl = "", note = "", valueWei = "0" } = req.body;
     if (!evidenceUrlsJson) return res.status(400).json({ error: "evidenceUrlsJson is required (JSON array of URLs)" });
 
     const { txHash, receipt } = await writeMethod(
       "submit_death_claim",
-      [Number(req.params.vaultId), evidenceUrlsJson, evidenceImageUrl, note, Number(nowTs)],
+      [Number(req.params.vaultId), evidenceUrlsJson, evidenceImageUrl, note],
       BigInt(valueWei)
     );
     await invalidate(`vault:${req.params.vaultId}`);
@@ -45,15 +44,15 @@ export const submitClaim = async (req, res, next) => {
   }
 };
 
-// POST /claims/:id/contest  body: { contestUrlsJson, contestImageUrl, nowTs, valueWei }
+// POST /claims/:id/contest  body: { contestUrlsJson, contestImageUrl, valueWei }
 claimsRouter.post("/:id/contest", async (req, res, next) => {
   try {
-    const { contestUrlsJson, contestImageUrl = "", nowTs = Math.floor(Date.now() / 1000), valueWei = "0" } = req.body;
+    const { contestUrlsJson, contestImageUrl = "", valueWei = "0" } = req.body;
     if (!contestUrlsJson) return res.status(400).json({ error: "contestUrlsJson is required (JSON array of URLs)" });
 
     const result = await writeMethod(
       "contest_claim",
-      [Number(req.params.id), contestUrlsJson, contestImageUrl, Number(nowTs)],
+      [Number(req.params.id), contestUrlsJson, contestImageUrl],
       BigInt(valueWei)
     );
     await invalidate(`claim:${req.params.id}`);
@@ -63,14 +62,13 @@ claimsRouter.post("/:id/contest", async (req, res, next) => {
   }
 });
 
-// POST /claims/:id/resolve  body: { nowTs }
+// POST /claims/:id/resolve
 // This triggers the contract's single non-deterministic block (evidence
 // fetch + LLM verdict under validator consensus) — expect it to be slower
 // than the other writes.
 claimsRouter.post("/:id/resolve", async (req, res, next) => {
   try {
-    const nowTs = req.body?.nowTs ?? Math.floor(Date.now() / 1000);
-    const result = await writeMethod("resolve_claim", [Number(req.params.id), Number(nowTs)]);
+    const result = await writeMethod("resolve_claim", [Number(req.params.id)]);
     await invalidate(`claim:${req.params.id}`);
     res.json(result);
   } catch (err) {
