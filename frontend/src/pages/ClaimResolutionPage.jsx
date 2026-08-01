@@ -8,7 +8,7 @@ import { formatGen } from "../lib/gen.js";
 import { formatTs } from "../lib/time.js";
 import { api } from "../api.js";
 import { write } from "../lib/writes.js";
-import { useAddress } from "../lib/AddressContext.jsx";
+import { useAddress, shortenAddress } from "../lib/AddressContext.jsx";
 
 const VERDICT_ICON = { CONFIRMED: "gavel", REFUTED: "gavel", INCONCLUSIVE: "help" };
 const VERDICT_TONE = {
@@ -27,19 +27,29 @@ function PayoutRow({ label, description, amount, tone }) {
   );
 }
 
-function PayoutBreakdown({ claim }) {
+function PayoutBreakdown({ claim, contests }) {
   const claimantBond = claim.claimant_bond_wei;
-  const contesterBond = claim.contester_bond_wei;
-  const hasContester = Boolean(claim.contester);
+
+  function contesterRows(description, tone, sign = "") {
+    return contests
+      .filter((c) => Number(c.bond_wei) > 0)
+      .map((c) => (
+        <PayoutRow
+          key={c.id}
+          label={`Contester Bond (#${c.id})`}
+          description={description}
+          amount={`${sign}${formatGen(c.bond_wei)}`}
+          tone={tone}
+        />
+      ));
+  }
 
   if (claim.status === "CONFIRMED") {
     return (
       <>
         <PayoutRow label="Vault Principal" description="Released to the beneficiary's withdrawable balance." amount="→ Beneficiary" />
         <PayoutRow label="Claimant Bond" description="Returned in full — the claim was upheld." amount={formatGen(claimantBond)} tone="text-tertiary" />
-        {hasContester && (
-          <PayoutRow label="Contester Bond" description="Forfeited into the beneficiary's payout — the contest was overruled." amount={`+${formatGen(contesterBond)}`} tone="text-tertiary" />
-        )}
+        {contesterRows("Forfeited into the beneficiary's payout — the contest was overruled.", "text-tertiary", "+")}
       </>
     );
   }
@@ -47,9 +57,7 @@ function PayoutBreakdown({ claim }) {
     return (
       <>
         <PayoutRow label="Claimant Bond" description="Forfeited into the vault balance — the claim was disproven." amount={formatGen(claimantBond)} tone="text-error" />
-        {hasContester && (
-          <PayoutRow label="Contester Bond" description="Returned in full — the contest was vindicated." amount={formatGen(contesterBond)} tone="text-tertiary" />
-        )}
+        {contesterRows("Returned in full — the contest was vindicated.", "text-tertiary")}
         <PayoutRow label="Vault" description="Reopens ACTIVE with the forfeited bond added to its balance." amount="Reopened" />
       </>
     );
@@ -58,9 +66,7 @@ function PayoutBreakdown({ claim }) {
     return (
       <>
         <PayoutRow label="Claimant Bond" description="Returned in full — abstention penalizes nobody." amount={formatGen(claimantBond)} tone="text-tertiary" />
-        {hasContester && (
-          <PayoutRow label="Contester Bond" description="Returned in full." amount={formatGen(contesterBond)} tone="text-tertiary" />
-        )}
+        {contesterRows("Returned in full.", "text-tertiary")}
         <PayoutRow label="Vault" description="Untouched, reopens ACTIVE for a future claim." amount="Reopened" />
       </>
     );
@@ -72,12 +78,14 @@ export default function ClaimResolutionPage() {
   const { id } = useParams();
   const { glClient } = useAddress();
   const [claim, setClaim] = useState(null);
+  const [contests, setContests] = useState([]);
   const [error, setError] = useState("");
   const [resolving, setResolving] = useState(false);
   const [now] = useState(Math.floor(Date.now() / 1000));
 
   const load = useCallback(() => {
     api.getClaim(id).then(setClaim).catch((err) => setError(err.message));
+    api.getContestsForClaim(id).then(setContests).catch(() => {});
   }, [id]);
 
   useEffect(load, [load]);
@@ -165,7 +173,9 @@ export default function ClaimResolutionPage() {
           )}
 
           <EvidenceList title="Death-claim evidence" urls={claim.evidence_urls} imageUrl={claim.evidence_image_url} />
-          <EvidenceList title="Contest evidence" urls={claim.contest_urls} imageUrl={claim.contest_image_url} />
+          {contests.map((c) => (
+            <EvidenceList key={c.id} title={`Contest #${c.id} evidence — ${shortenAddress(c.contester)}`} urls={c.urls} imageUrl={c.image_url} />
+          ))}
 
           {resolved && (
             <section className="glass-panel p-6 rounded-xl">
@@ -179,7 +189,7 @@ export default function ClaimResolutionPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-outline-variant/10">
-                  <PayoutBreakdown claim={claim} />
+                  <PayoutBreakdown claim={claim} contests={contests} />
                 </tbody>
               </table>
             </section>

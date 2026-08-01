@@ -16,7 +16,7 @@ single, high-stakes question: *has this specific named person died?*
 **Live:**
 - App: [obolus-app.vercel.app](https://obolus-app.vercel.app)
 - API: [obolus-backend.fly.dev](https://obolus-backend.fly.dev)
-- Contract: `0xEd42fEc35Ae47F396668976a8fB16fa9a42aDa05` on GenLayer StudioNet
+- Contract: `0x82a1e87F2Abc790B950fD645E6D7A5aC27F43f91` on GenLayer StudioNet
 
 ---
 

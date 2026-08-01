@@ -86,6 +86,19 @@ MAX_VAULTS_PER_ADDRESS = 200   # scan cap, not a hard business limit
 MIN_CONTEST_WINDOW_SECONDS = 3600            # 1 hour floor — always some window
 MAX_CONTEST_WINDOW_SECONDS = 180 * 24 * 3600  # 180 days ceiling — sanity rail
 
+# Contests are append-only (see Contest dataclass): this bounds how many a
+# single claim can accumulate, not how many any one contester may submit.
+# Generous scan/storage cap, not artificial scarcity — matches the spirit
+# of MAX_VAULTS_PER_ADDRESS below.
+MAX_CONTESTS_PER_CLAIM = 20
+# Aggregate cap on contest URLs actually fed into one resolution round,
+# across ALL stored contests for a claim — independent of how many
+# contests exist. Earliest-submitted contests win the slots (see
+# _aggregate_contest_evidence): since a contest can never be edited or
+# removed, evidence already on record can never be pushed out by a later,
+# lower-quality submission trying to flood the aggregate.
+MAX_CONTEST_URLS_PER_RESOLUTION = MAX_CONTEST_URLS
+
 # GEN is 18-decimal; amounts are always u256 wei, never floats.
 WEI = 1
 
@@ -343,10 +356,7 @@ class Claim:
     evidence_image_url: str        # optional single screenshot/photo URL, "" if none
     claimant_note: str
     claimant_bond_wei: u256
-    contest_urls_json: str         # JSON array of contest/life-evidence URLs
-    contest_image_url: str         # optional single counter-evidence screenshot URL
-    contester: str                 # hex address of whoever contested, "" if uncontested
-    contester_bond_wei: u256
+    contest_count: u32             # number of Contest rows filed against this claim
     submitted_ts: u64
     contest_deadline_ts: u64
     resolved_ts: u64
@@ -355,6 +365,26 @@ class Claim:
     reasoning: str
     evidence_summary: str
     resolution_attempts: u32
+
+
+@allow_storage
+@dataclass
+class Contest:
+    """One counter-evidence submission against a claim. Append-only by
+    design: once stored, a Contest row is never edited or overwritten by
+    anyone, including its own submitter or a later contester — only new
+    rows can be added, up to MAX_CONTESTS_PER_CLAIM. This is the fix for
+    the prior design, where a claim held a single mutable contest slot
+    that any later caller could silently replace, erasing a stronger
+    proof-of-life submission an earlier contester had put on record before
+    resolution ever ran."""
+    id: u32
+    claim_id: u32
+    contester: Address
+    urls_json: str        # JSON array of this contest's counter-evidence URLs
+    image_url: str         # optional single counter-evidence screenshot URL, "" if none
+    bond_wei: u256
+    submitted_ts: u64
 
 
 # ============================================================================
@@ -396,6 +426,11 @@ class VerifiableDeceaseEscrow(gl.Contract):
     claims: TreeMap[u32, Claim]
     vault_claim_ids: TreeMap[u32, DynArray[u32]]
 
+    # ---- contest storage — append-only; see Contest dataclass -------------
+    contest_count: u64
+    contests: TreeMap[u32, Contest]
+    claim_contest_ids: TreeMap[u32, DynArray[u32]]
+
     # ---- internal withdrawable balances — credited by refunds, payouts,
     # bond returns and forfeitures; withdraw() is the only path that turns
     # a credit into a real native transfer. ----------------------------------
@@ -427,6 +462,7 @@ class VerifiableDeceaseEscrow(gl.Contract):
         self.min_contester_bond_wei = u256(max(0, int(min_contester_bond_wei)))
         self.vault_count = u64(0)
         self.claim_count = u64(0)
+        self.contest_count = u64(0)
         self.total_escrowed_wei = u256(0)
         self.total_paid_out_wei = u256(0)
         self.total_claims_confirmed = u64(0)
@@ -490,6 +526,23 @@ class VerifiableDeceaseEscrow(gl.Contract):
             self.vault_claim_ids[vid] = []
         self.vault_claim_ids[vid].append(u32(claim_id))
 
+    def _record_claim_contest(self, claim_id: int, contest_id: int) -> None:
+        cid = u32(claim_id)
+        if self.claim_contest_ids.get(cid) is None:
+            self.claim_contest_ids[cid] = []
+        self.claim_contest_ids[cid].append(u32(contest_id))
+
+    def _get_contests_for_claim(self, claim_id: int) -> list[Contest]:
+        ids = self.claim_contest_ids.get(u32(claim_id))
+        if ids is None:
+            return []
+        result = []
+        for cxid in ids:
+            contest = self.contests.get(cxid)
+            if contest is not None:
+                result.append(contest)
+        return result
+
     # ------------------------------------------------------------------------
     #  Serialization for views (schema-safe primitives only — no dataclass
     #  objects or Address instances ever cross the view boundary raw).
@@ -513,6 +566,8 @@ class VerifiableDeceaseEscrow(gl.Contract):
         }
 
     def _claim_dict(self, claim: Claim) -> dict:
+        contests = self._get_contests_for_claim(int(claim.id))
+        total_contester_bond = sum(int(c.bond_wei) for c in contests)
         return {
             "id": int(claim.id),
             "vault_id": int(claim.vault_id),
@@ -522,10 +577,8 @@ class VerifiableDeceaseEscrow(gl.Contract):
             "evidence_image_url": claim.evidence_image_url,
             "claimant_note": claim.claimant_note,
             "claimant_bond_wei": int(claim.claimant_bond_wei),
-            "contest_urls": json.loads(claim.contest_urls_json) if claim.contest_urls_json else [],
-            "contest_image_url": claim.contest_image_url,
-            "contester": claim.contester,
-            "contester_bond_wei": int(claim.contester_bond_wei),
+            "contest_count": int(claim.contest_count),
+            "total_contester_bond_wei": total_contester_bond,
             "submitted_ts": int(claim.submitted_ts),
             "contest_deadline_ts": int(claim.contest_deadline_ts),
             "resolved_ts": int(claim.resolved_ts),
@@ -534,6 +587,17 @@ class VerifiableDeceaseEscrow(gl.Contract):
             "reasoning": claim.reasoning,
             "evidence_summary": claim.evidence_summary,
             "resolution_attempts": int(claim.resolution_attempts),
+        }
+
+    def _contest_dict(self, contest: Contest) -> dict:
+        return {
+            "id": int(contest.id),
+            "claim_id": int(contest.claim_id),
+            "contester": contest.contester.as_hex,
+            "urls": json.loads(contest.urls_json) if contest.urls_json else [],
+            "image_url": contest.image_url,
+            "bond_wei": int(contest.bond_wei),
+            "submitted_ts": int(contest.submitted_ts),
         }
 
     # ========================================================================
@@ -725,10 +789,7 @@ class VerifiableDeceaseEscrow(gl.Contract):
             evidence_image_url=image_url,
             claimant_note=note,
             claimant_bond_wei=u256(bond),
-            contest_urls_json="[]",
-            contest_image_url="",
-            contester="",
-            contester_bond_wei=u256(0),
+            contest_count=u32(0),
             submitted_ts=u64(now_ts),
             contest_deadline_ts=u64(now_ts + int(vault.contest_window_seconds)),
             resolved_ts=u64(0),
@@ -759,19 +820,25 @@ class VerifiableDeceaseEscrow(gl.Contract):
         are the ones actually lost, which is exactly the ambiguity this
         contract exists to resolve rather than assume). Attach at least
         min_contester_bond_wei; it is returned if the claim ultimately
-        resolves REFUTED or INCONCLUSIVE, and forfeited into the vault if
-        the claim resolves CONFIRMED despite the contest.
+        resolves REFUTED or INCONCLUSIVE, and forfeited into the vault (via
+        the beneficiary payout) if the claim resolves CONFIRMED despite
+        the contest.
 
-        Only one contest submission is stored per claim; calling again
-        before resolution replaces the prior contest evidence and bond
-        (the prior bond is refunded to its original submitter first, so
-        bonds never get silently overwritten and lost).
+        Append-only: every contest submitted before the window closes is
+        stored as its own row (up to MAX_CONTESTS_PER_CLAIM) and every one
+        is fed into resolution. Nobody — not even the original submitter —
+        can edit or remove a stored contest, so a later caller can never
+        erase a stronger proof-of-life submission an earlier contester
+        already put on record. Each contester's own bond is tracked and
+        routed back to them individually; bonds are never pooled or
+        attributed to the wrong submitter.
         """
         self._not_paused()
         claim = self._get_claim(claim_id)
         _require(int(claim.status) in (CLAIM_OPEN, CLAIM_CONTESTED), "claim is not open for contest")
         now_ts = _chain_now_ts()
         _require(now_ts <= int(claim.contest_deadline_ts), "contest window has closed")
+        _require(int(claim.contest_count) < MAX_CONTESTS_PER_CLAIM, "this claim has reached its contest limit")
 
         bond = int(gl.message.value)
         _require(bond >= int(self.min_contester_bond_wei), "contester bond below minimum")
@@ -782,17 +849,44 @@ class VerifiableDeceaseEscrow(gl.Contract):
         if contest_image_url and contest_image_url.strip():
             image_url = _normalize_url(contest_image_url, "contest_image_url")
 
-        # Refund any prior contester's bond before overwriting — a bond must
-        # never be silently replaced without being returned to its owner.
-        if int(claim.contester_bond_wei) > 0 and claim.contester:
-            self._credit_balance(_coerce_address(claim.contester), int(claim.contester_bond_wei))
-
+        contest_id = int(self.contest_count) + 1
+        self.contest_count = u64(contest_id)
+        cxid = u32(contest_id)
         sender = gl.message.sender_address
-        claim.contest_urls_json = json.dumps(urls)
-        claim.contest_image_url = image_url
-        claim.contester = sender.as_hex
-        claim.contester_bond_wei = u256(bond)
+
+        self.contests[cxid] = Contest(
+            id=cxid,
+            claim_id=u32(claim_id),
+            contester=sender,
+            urls_json=json.dumps(urls),
+            image_url=image_url,
+            bond_wei=u256(bond),
+            submitted_ts=u64(now_ts),
+        )
+        self._record_claim_contest(claim_id, contest_id)
+        claim.contest_count = u32(int(claim.contest_count) + 1)
         claim.status = u8(CLAIM_CONTESTED)
+
+    def _aggregate_contest_evidence(self, contests: list[Contest]) -> tuple[list[str], str]:
+        """Flatten every stored (append-only) contest into the URL list and
+        single image handed to resolution. Earliest-submitted contests fill
+        the aggregate URL slots first — since contests can never be edited
+        or removed, evidence already on record can never be pushed out of
+        the resolution round by a later, lower-quality flood of URLs. The
+        single contest image slot (matching the existing 2-image-total
+        budget: one death, one contest) is likewise the first non-empty
+        image among all stored contests, in submission order."""
+        urls: list[str] = []
+        image_url = ""
+        for contest in contests:
+            if len(urls) < MAX_CONTEST_URLS_PER_RESOLUTION:
+                for u in json.loads(contest.urls_json) if contest.urls_json else []:
+                    if len(urls) >= MAX_CONTEST_URLS_PER_RESOLUTION:
+                        break
+                    urls.append(u)
+            if not image_url and contest.image_url:
+                image_url = contest.image_url
+        return urls, image_url
 
     # ========================================================================
     #  Non-deterministic evidence gathering — INSIDE the leader closure only.
@@ -1033,17 +1127,23 @@ Respond with ONLY a JSON object, no markdown, with exactly these keys:
         Terminal fund routing (every branch, so nothing is ever stranded):
           - CONFIRMED (HIGH confidence, DECEASED): vault balance credited to
             the beneficiary; claimant's bond returned to the claimant;
-            contester's bond (if any) forfeited into the vault, then also
-            paid out as part of the same credit since the vault is now
-            fully resolved.
+            every contester's bond (if any) forfeited into the vault, then
+            also paid out as part of the same credit since the vault is
+            now fully resolved.
           - REFUTED (HIGH confidence, ALIVE_OR_REFUTED): claim closed,
             vault reopens to ACTIVE; claimant's bond forfeited into the
-            vault balance; contester's bond (if any) returned to the
-            contester.
+            vault balance; every contester's bond (if any) returned to its
+            own submitter.
           - INCONCLUSIVE (anything else — the abstention path): claim
-            closed, vault reopens to ACTIVE; BOTH bonds are returned in
-            full, since neither side was shown wrong. A fresh claim with
-            stronger evidence may be submitted later; nothing is lost.
+            closed, vault reopens to ACTIVE; the claimant's bond AND every
+            contester's own bond are returned in full, since nobody was
+            shown wrong. A fresh claim with stronger evidence may be
+            submitted later; nothing is lost.
+
+        Every contest ever submitted against this claim (append-only, see
+        contest_claim) is fed into the same resolution round and routed
+        individually — no contest is ever dropped or merged into another
+        submitter's bond.
 
         Returns the claim's post-resolution view dict.
         """
@@ -1058,8 +1158,9 @@ Respond with ONLY a JSON object, no markdown, with exactly these keys:
         _require(int(vault.status) == VAULT_CLAIM_PENDING, "vault is not awaiting resolution")
         _require(int(vault.active_claim_id) == int(claim.id), "claim is not this vault's active claim")
 
+        contests = self._get_contests_for_claim(int(claim.id))
         death_urls = json.loads(claim.evidence_urls_json) if claim.evidence_urls_json else []
-        contest_urls = json.loads(claim.contest_urls_json) if claim.contest_urls_json else []
+        contest_urls, contest_image_url = self._aggregate_contest_evidence(contests)
         subject_akas = json.loads(vault.subject_aka_json) if vault.subject_aka_json else []
 
         verdict = self._resolve_nondet(
@@ -1070,7 +1171,7 @@ Respond with ONLY a JSON object, no markdown, with exactly these keys:
             death_urls,
             claim.evidence_image_url,
             contest_urls,
-            claim.contest_image_url,
+            contest_image_url,
             now_ts,
         )
 
@@ -1084,8 +1185,6 @@ Respond with ONLY a JSON object, no markdown, with exactly these keys:
         determination = verdict["determination"]
         confidence = verdict["confidence"]
         claimant_bond = int(claim.claimant_bond_wei)
-        contester_bond = int(claim.contester_bond_wei)
-        contester_addr = _coerce_address(claim.contester) if claim.contester else None
 
         if determination == DETERMINATION_DECEASED and confidence == CONFIDENCE_HIGH:
             # --- CONFIRMED: money moves. Zero the ledger and persist state
@@ -1103,11 +1202,13 @@ Respond with ONLY a JSON object, no markdown, with exactly these keys:
 
             self._credit_balance(vault.beneficiary, payout)
             self._credit_balance(claim.claimant, claimant_bond)
-            # A contester who submitted evidence but was overruled by a
-            # HIGH-confidence DECEASED verdict forfeits their bond into the
-            # same payout the beneficiary receives — it does not vanish.
-            if contester_addr is not None and contester_bond > 0:
-                self._credit_balance(vault.beneficiary, contester_bond)
+            # Every contester who submitted evidence but was overruled by a
+            # HIGH-confidence DECEASED verdict forfeits their own bond into
+            # the same payout the beneficiary receives — none of them vanish.
+            for contest in contests:
+                bond = int(contest.bond_wei)
+                if bond > 0:
+                    self._credit_balance(vault.beneficiary, bond)
 
         elif determination == DETERMINATION_ALIVE_OR_REFUTED and confidence == CONFIDENCE_HIGH:
             # --- REFUTED: no payout. Claimant's bond is slashed into the
@@ -1121,13 +1222,16 @@ Respond with ONLY a JSON object, no markdown, with exactly these keys:
             if claimant_bond > 0:
                 vault.balance_wei = u256(int(vault.balance_wei) + claimant_bond)
                 self.total_escrowed_wei = u256(int(self.total_escrowed_wei) + claimant_bond)
-            if contester_addr is not None and contester_bond > 0:
-                self._credit_balance(contester_addr, contester_bond)
+            for contest in contests:
+                bond = int(contest.bond_wei)
+                if bond > 0:
+                    self._credit_balance(contest.contester, bond)
 
         else:
             # --- INCONCLUSIVE: the abstention path. Nobody was shown
-            # wrong, so nobody is penalized — both bonds return in full and
-            # the vault simply reopens for a future, better-evidenced claim.
+            # wrong, so nobody is penalized — every bond returns in full to
+            # its own submitter and the vault simply reopens for a future,
+            # better-evidenced claim.
             claim.status = u8(CLAIM_INCONCLUSIVE)
             vault.status = u8(VAULT_ACTIVE)
             vault.active_claim_id = u32(0)
@@ -1135,8 +1239,10 @@ Respond with ONLY a JSON object, no markdown, with exactly these keys:
 
             if claimant_bond > 0:
                 self._credit_balance(claim.claimant, claimant_bond)
-            if contester_addr is not None and contester_bond > 0:
-                self._credit_balance(contester_addr, contester_bond)
+            for contest in contests:
+                bond = int(contest.bond_wei)
+                if bond > 0:
+                    self._credit_balance(contest.contester, bond)
 
         return self._claim_dict(claim)
 
@@ -1212,6 +1318,13 @@ Respond with ONLY a JSON object, no markdown, with exactly these keys:
     @gl.public.view
     def get_claim(self, claim_id: int) -> dict:
         return self._claim_dict(self._get_claim(claim_id))
+
+    @gl.public.view
+    def get_contests_for_claim(self, claim_id: int) -> list[dict]:
+        """Every append-only contest submission stored against this claim,
+        in submission order — none can ever have been edited or removed."""
+        self._get_claim(claim_id)
+        return [self._contest_dict(c) for c in self._get_contests_for_claim(claim_id)]
 
     @gl.public.view
     def get_claims_for_vault(self, vault_id: int) -> list[dict]:

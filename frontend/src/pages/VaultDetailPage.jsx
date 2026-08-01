@@ -207,6 +207,7 @@ export default function VaultDetailPage() {
   const { address, glClient } = useAddress();
   const [vault, setVault] = useState(null);
   const [claims, setClaims] = useState([]);
+  const [contests, setContests] = useState([]);
   const [error, setError] = useState("");
   const [showContest, setShowContest] = useState(false);
   const [resolving, setResolving] = useState(false);
@@ -224,6 +225,18 @@ export default function VaultDetailPage() {
   }, [id]);
 
   useEffect(load, [load]);
+
+  const activeClaimId = vault?.active_claim_id;
+  useEffect(() => {
+    if (!activeClaimId) {
+      setContests([]);
+      return;
+    }
+    api
+      .getContestsForClaim(activeClaimId)
+      .then(setContests)
+      .catch(() => {});
+  }, [activeClaimId]);
 
   useEffect(() => {
     const t = setInterval(() => setNow(Math.floor(Date.now() / 1000)), 1000);
@@ -308,7 +321,9 @@ export default function VaultDetailPage() {
                   </div>
                 )}
                 <EvidenceList title="Death-claim evidence" urls={activeClaim.evidence_urls} imageUrl={activeClaim.evidence_image_url} />
-                <EvidenceList title="Contest evidence" urls={activeClaim.contest_urls} imageUrl={activeClaim.contest_image_url} />
+                {contests.map((c) => (
+                  <EvidenceList key={c.id} title={`Contest #${c.id} evidence — ${shortenAddress(c.contester)}`} urls={c.urls} imageUrl={c.image_url} />
+                ))}
 
                 {showContest && contestOpen && (
                   <div className="pt-4 border-t border-outline-variant/20">

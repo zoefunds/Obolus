@@ -14,6 +14,18 @@ claimsRouter.get("/:id", async (req, res, next) => {
   }
 });
 
+// GET /claims/:id/contests
+claimsRouter.get("/:id/contests", async (req, res, next) => {
+  try {
+    const contests = await cached(`claim_contests:${req.params.id}`, 5, () =>
+      readMethod("get_contests_for_claim", [Number(req.params.id)])
+    );
+    res.json(contests);
+  } catch (err) {
+    next(err);
+  }
+});
+
 // GET /claims/:id/resolvable
 claimsRouter.get("/:id/resolvable", async (req, res, next) => {
   try {
@@ -56,6 +68,7 @@ claimsRouter.post("/:id/contest", async (req, res, next) => {
       BigInt(valueWei)
     );
     await invalidate(`claim:${req.params.id}`);
+    await invalidate(`claim_contests:${req.params.id}`);
     res.json(result);
   } catch (err) {
     next(err);

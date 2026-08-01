@@ -350,7 +350,10 @@ def test_contest_claim_within_window(vm):
     c.contest_claim(cid, CONTEST_URLS, "")
     claim = c.get_claim(cid)
     assert claim["status"] == "CONTESTED"
-    assert claim["contester"].lower() == hx(CONTESTER).lower()
+    assert claim["contest_count"] == 1
+    contests = c.get_contests_for_claim(cid)
+    assert len(contests) == 1
+    assert contests[0]["contester"].lower() == hx(CONTESTER).lower()
 
 
 def test_contest_claim_after_window_rejected(vm):
@@ -375,25 +378,91 @@ def test_contest_claim_below_minimum_bond_rejected(vm):
         c.contest_claim(cid, CONTEST_URLS, "")
 
 
-def test_second_contest_refunds_first_contesters_bond(vm):
+def test_second_contest_appends_without_erasing_first(vm):
+    """Regression test for the append-only fix: a second contest must never
+    silently replace or erase the first contester's evidence and bond —
+    both are retained as separate rows, both bonds stay staked (not
+    refunded) until resolution."""
     c = fresh(vm, contester_bond=GEN // 100)
     vid = make_vault(vm, c, window=DAY)
     cid = open_claim(vm, c, vid, now_ts=NOW)
 
+    first_urls = json.dumps(["https://social.example.com/first-contester-proof"])
+    vm.sender = CONTESTER
+    vm.value = GEN // 100
+    warp(vm, NOW + HOUR)
+    c.contest_claim(cid, first_urls, "")
+
+    second_contester = create_address("second_contester")
+    second_urls = json.dumps(["https://social.example.com/second-contester-proof"])
+    vm.sender = second_contester
+    vm.value = GEN // 100
+    warp(vm, NOW + 2 * HOUR)
+    c.contest_claim(cid, second_urls, "")
+
+    # neither bond is refunded early — both remain staked pending resolution
+    assert c.get_balance_of(hx(CONTESTER)) == 0
+    assert c.get_balance_of(hx(second_contester)) == 0
+
+    claim = c.get_claim(cid)
+    assert claim["contest_count"] == 2
+    assert claim["total_contester_bond_wei"] == GEN // 50
+
+    contests = c.get_contests_for_claim(cid)
+    assert len(contests) == 2
+    assert contests[0]["contester"].lower() == hx(CONTESTER).lower()
+    assert contests[0]["urls"] == ["https://social.example.com/first-contester-proof"]
+    assert contests[1]["contester"].lower() == hx(second_contester).lower()
+    assert contests[1]["urls"] == ["https://social.example.com/second-contester-proof"]
+
+
+def test_contest_limit_per_claim_enforced(vm):
+    c = fresh(vm)
+    vid = make_vault(vm, c, window=DAY)
+    cid = open_claim(vm, c, vid, now_ts=NOW)
+
+    import _contract_verifiable_decease_escrow as mod
+
+    for i in range(mod.MAX_CONTESTS_PER_CLAIM):
+        vm.sender = create_address(f"contester_{i}")
+        vm.value = 0
+        warp(vm, NOW + HOUR)
+        c.contest_claim(cid, CONTEST_URLS, "")
+
+    vm.sender = create_address("one_too_many")
+    vm.value = 0
+    with vm.expect_revert():
+        c.contest_claim(cid, CONTEST_URLS, "")
+
+
+def test_resolve_confirmed_forfeits_every_contesters_bond(vm):
+    """Multiple append-only contests must each be routed individually on
+    resolution — none pooled, none dropped."""
+    c = fresh(vm, contester_bond=GEN // 100)
+    vid = make_vault(vm, c, window=DAY, deposit=3 * GEN)
+    cid = open_claim(vm, c, vid, now_ts=NOW)
+
+    second_contester = create_address("second_contester")
     vm.sender = CONTESTER
     vm.value = GEN // 100
     warp(vm, NOW + HOUR)
     c.contest_claim(cid, CONTEST_URLS, "")
-
-    second_contester = create_address("second_contester")
     vm.sender = second_contester
     vm.value = GEN // 100
     warp(vm, NOW + 2 * HOUR)
     c.contest_claim(cid, CONTEST_URLS, "")
 
-    # first contester's bond must be refunded, not lost, when overwritten
-    assert c.get_balance_of(hx(CONTESTER)) == GEN // 100
-    assert c.get_claim(cid)["contester"].lower() == hx(second_contester).lower()
+    mock_sources(vm)
+    vm.mock_llm(r".*", verdict("DECEASED", "HIGH"))
+    vm.sender = STRANGER
+    vm.value = 0
+    warp(vm, NOW + DAY)
+    c.resolve_claim(cid)
+
+    # both overruled contesters' bonds flow to the beneficiary, not stranded
+    assert c.get_balance_of(hx(BENEFICIARY)) == 3 * GEN + GEN // 50
+    assert c.get_balance_of(hx(CONTESTER)) == 0
+    assert c.get_balance_of(hx(second_contester)) == 0
 
 
 # ---------------------------------------------------------------------------

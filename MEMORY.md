@@ -174,7 +174,7 @@ funds here only cross on confirmed passage (death), matching the product exactly
 
 ## Live deployment (2026-07-27)
 
-- **Contract:** `0xEd42fEc35Ae47F396668976a8fB16fa9a42aDa05` on GenLayer StudioNet.
+- **Contract:** `0x82a1e87F2Abc790B950fD645E6D7A5aC27F43f91` on GenLayer StudioNet.
 - **Backend:** `https://obolus-backend.fly.dev` — Fly.io app `obolus-backend`, 2 machines
   (`min_machines_running = 1`, `auto_stop_machines = false` in `fly.toml`, so it never
   scales to zero — the "must never die" requirement). Redis (Upstash, via `REDIS_URL`
