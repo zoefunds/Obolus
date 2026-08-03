@@ -1,43 +1,10 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { GlassPanel, Icon, EmptyState, Spinner } from "../components/ui.jsx";
-import StatusBadge from "../components/StatusBadge.jsx";
+import VaultCard from "../components/VaultCard.jsx";
 import { useAddress, shortenAddress } from "../lib/AddressContext.jsx";
 import { formatGen } from "../lib/gen.js";
 import { api } from "../api.js";
-
-const STATUS_ICON = {
-  ACTIVE: "lock",
-  CLAIM_PENDING: "pending_actions",
-  PAYOUT_READY: "lock_open",
-  CANCELLED: "block",
-};
-
-function VaultCard({ vault, roleLabel }) {
-  return (
-    <Link
-      to={`/vaults/${vault.id}`}
-      className={`glass-panel p-6 rounded-xl block group cursor-pointer hover:bg-surface-variant/20 transition-all duration-300 border-l-[3px] ${
-        vault.status === "ACTIVE" || vault.status === "PAYOUT_READY" ? "border-l-primary" : "border-l-outline-variant/50"
-      }`}
-    >
-      <div className="flex justify-between items-start mb-3">
-        <div className="w-10 h-10 rounded bg-primary/10 flex items-center justify-center text-primary">
-          <Icon name={STATUS_ICON[vault.status] || "lock"} />
-        </div>
-        <StatusBadge status={vault.status} size="sm" />
-      </div>
-      <h3 className="text-headline-md font-semibold mb-1">
-        Vault #{vault.id} — {vault.subject_name}
-      </h3>
-      <p className="text-label-sm font-mono text-outline mb-4">{roleLabel}</p>
-      <div className="flex justify-between text-label-sm font-mono border-t border-outline-variant/20 pt-3">
-        <span className="text-outline">Escrowed</span>
-        <span className="text-on-surface">{formatGen(vault.balance_wei)}</span>
-      </div>
-    </Link>
-  );
-}
 
 export default function DashboardPage() {
   const { address } = useAddress();
@@ -84,10 +51,19 @@ export default function DashboardPage() {
           <h1 className="text-headline-lg font-bold mb-2">Dashboard</h1>
           <p className="text-on-surface-variant text-body-md">Vaults you've granted or stand to benefit from.</p>
         </div>
-        <Link to="/vaults/new" className="px-6 py-3 bg-primary text-on-primary font-medium rounded-lg hover:brightness-110 transition-all flex items-center gap-2 self-start">
-          <Icon name="add" className="text-[18px]" />
-          New Vault
-        </Link>
+        <div className="flex gap-3 self-start">
+          <Link
+            to="/vaults"
+            className="px-6 py-3 border border-outline-variant/50 text-on-surface-variant font-medium rounded-lg hover:border-primary/40 hover:text-primary transition-all flex items-center gap-2"
+          >
+            <Icon name="travel_explore" className="text-[18px]" />
+            Browse All Vaults
+          </Link>
+          <Link to="/vaults/new" className="px-6 py-3 bg-primary text-on-primary font-medium rounded-lg hover:brightness-110 transition-all flex items-center gap-2">
+            <Icon name="add" className="text-[18px]" />
+            New Vault
+          </Link>
+        </div>
       </div>
 
       {stats && (

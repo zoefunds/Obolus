@@ -8,6 +8,7 @@ import { useIsOwner } from "../lib/useIsOwner.js";
 
 const NAV_LINKS = [
   { to: "/dashboard", label: "Dashboard" },
+  { to: "/vaults", label: "Browse" },
   { to: "/vaults/new", label: "New Vault" },
 ];
 

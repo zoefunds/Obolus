@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { GlassPanel, Icon, Field, Input, Button, ErrorBanner } from "../components/ui.jsx";
 import { useAddress } from "../lib/AddressContext.jsx";
-import { genToWei } from "../lib/gen.js";
+import { genToWei, formatGen } from "../lib/gen.js";
 import { api } from "../api.js";
 import { write } from "../lib/writes.js";
 
@@ -160,11 +160,11 @@ export default function CreateVaultPage() {
                 <div className="flex gap-4 flex-wrap">
                   <div className="px-3 py-2 rounded-lg bg-surface-container-lowest border border-outline-variant/10">
                     <span className="block text-[10px] font-mono text-outline uppercase mb-0.5">Min. claimant bond</span>
-                    <span className="text-on-surface font-mono text-code-md">{config.min_claimant_bond_wei} wei</span>
+                    <span className="text-on-surface font-mono text-code-md">{formatGen(config.min_claimant_bond_wei)}</span>
                   </div>
                   <div className="px-3 py-2 rounded-lg bg-surface-container-lowest border border-outline-variant/10">
                     <span className="block text-[10px] font-mono text-outline uppercase mb-0.5">Min. contester bond</span>
-                    <span className="text-on-surface font-mono text-code-md">{config.min_contester_bond_wei} wei</span>
+                    <span className="text-on-surface font-mono text-code-md">{formatGen(config.min_contester_bond_wei)}</span>
                   </div>
                 </div>
               )}

@@ -3,6 +3,7 @@ import Layout from "./components/Layout.jsx";
 import { AddressProvider } from "./lib/AddressContext.jsx";
 import LandingPage from "./pages/LandingPage.jsx";
 import DashboardPage from "./pages/DashboardPage.jsx";
+import BrowseVaultsPage from "./pages/BrowseVaultsPage.jsx";
 import CreateVaultPage from "./pages/CreateVaultPage.jsx";
 import VaultDetailPage from "./pages/VaultDetailPage.jsx";
 import SubmitClaimPage from "./pages/SubmitClaimPage.jsx";
@@ -19,6 +20,7 @@ export default function App() {
           <Routes>
             <Route path="/" element={<LandingPage />} />
             <Route path="/dashboard" element={<DashboardPage />} />
+            <Route path="/vaults" element={<BrowseVaultsPage />} />
             <Route path="/vaults/new" element={<CreateVaultPage />} />
             <Route path="/vaults/:id" element={<VaultDetailPage />} />
             <Route path="/vaults/:id/claim" element={<SubmitClaimPage />} />
