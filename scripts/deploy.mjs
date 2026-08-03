@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Deploys contracts/verifiable_decease_escrow.py to the configured GenLayer
+// Deploys contracts/obolus.py to the configured GenLayer
 // network using genlayer-js directly (not the `genlayer` CLI's `write`
 // command — that path hardcodes value: 0n and cannot carry native GEN,
 // which this contract's create_vault/fund_vault require; see the
@@ -41,7 +41,7 @@ async function main() {
 
   const client = createClient({ chain, account });
 
-  const contractCode = readFileSync(path.join(root, "contracts", "verifiable_decease_escrow.py"));
+  const contractCode = readFileSync(path.join(root, "contracts", "obolus.py"));
 
   const minClaimantBondWei = BigInt(process.env.MIN_CLAIMANT_BOND_WEI || "0");
   const minContesterBondWei = BigInt(process.env.MIN_CONTESTER_BOND_WEI || "0");

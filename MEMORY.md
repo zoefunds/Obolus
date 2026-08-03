@@ -246,3 +246,37 @@ show up after future changes:
    default on a team-scoped account** — not just the auto-generated preview URLs. A
    freshly aliased custom subdomain still 302'd to `vercel.com/sso-api` until protection
    was explicitly disabled per-project.
+
+## Contract evolution after the initial deploy
+
+Two behavioral changes landed after the deployment above, each redeploying to a new
+contract address (current: `0x82a1e87F2Abc790B950fD645E6D7A5aC27F43f91`):
+
+1. **`now_ts` removed from every timed method.** `create_vault`, `cancel_vault`,
+   `submit_death_claim`, `contest_claim`, `resolve_claim`, and `is_resolvable` originally
+   took a caller-supplied `now_ts` parameter (a holdover from testing convenience). That
+   let contest-window timing be driven by whatever timestamp a caller chose to pass —
+   not a real vulnerability given the deterministic bounds elsewhere, but an
+   unnecessary trust assumption for something the chain already knows. Replaced with
+   `_chain_now_ts()` everywhere; the backend routes and every frontend write call site
+   were updated to stop sending it, and the test suite now drives contest-window
+   boundaries via VM clock warps instead of an explicit argument.
+2. **Contests made append-only.** The original `Claim` dataclass held a single mutable
+   contest slot (`contester`, `contester_bond_wei`, `contest_urls_json`,
+   `contest_image_url`) — a later caller contesting the same claim silently overwrote
+   whatever the previous contester had submitted, which meant a strong proof-of-life
+   submission on record could be erased by a weaker one filed afterward, including by
+   the same contester or anyone else. Fixed by introducing an append-only `Contest`
+   dataclass (`get_contests_for_claim` returns every row), capped at
+   `MAX_CONTESTS_PER_CLAIM = 20`, with each contester's own bond routed individually on
+   resolution rather than tracking one contester per claim. `Claim.contest_count` and
+   the aggregated `total_contester_bond_wei` (computed in `_claim_dict`) replace the old
+   single-contest fields in `get_claim`'s response shape.
+
+**The contract file itself was also renamed** from `verifiable_decease_escrow.py` to
+`obolus.py` (matching the project's actual name) — every reference across
+`scripts/deploy.mjs`, `package.json`, `.github/workflows/ci.yml`,
+`tests/direct/test_obolus.py` (renamed from `test_verifiable_decease_escrow.py`, including
+its internal `_contract_verifiable_decease_escrow` → `_contract_obolus` module-name
+references), and both READMEs was updated to match. The contract's class name
+(`VerifiableDeceaseEscrow`) was left unchanged — only the file/module name moved.

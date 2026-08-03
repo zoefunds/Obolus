@@ -15,7 +15,7 @@
     "backend:prod:logs": "pm2 logs obolus-backend",
     "frontend": "npm run dev --workspace frontend",
     "test:contract": "pytest tests/direct/ -v",
-    "lint:contract": "genvm-lint check contracts/verifiable_decease_escrow.py --json"
+    "lint:contract": "genvm-lint check contracts/obolus.py --json"
   },
   "devDependencies": {
     "genlayer-js": "^1.1.8",

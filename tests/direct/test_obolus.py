@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 from gltest.direct import deploy_contract, create_address
 
-CONTRACT = Path(__file__).parent.parent.parent / "contracts" / "verifiable_decease_escrow.py"
+CONTRACT = Path(__file__).parent.parent.parent / "contracts" / "obolus.py"
 
 GEN = 10**18
 NOW = int(time.time())
@@ -421,7 +421,7 @@ def test_contest_limit_per_claim_enforced(vm):
     vid = make_vault(vm, c, window=DAY)
     cid = open_claim(vm, c, vid, now_ts=NOW)
 
-    import _contract_verifiable_decease_escrow as mod
+    import _contract_obolus as mod
 
     for i in range(mod.MAX_CONTESTS_PER_CLAIM):
         vm.sender = create_address(f"contester_{i}")
@@ -802,7 +802,7 @@ def test_looks_like_image_rejects_non_image_bytes(vm):
     c = fresh(vm)
     import sys
 
-    module = sys.modules["_contract_verifiable_decease_escrow"]
+    module = sys.modules["_contract_obolus"]
     looks_like_image = module._looks_like_image
 
     assert looks_like_image(b"<html><body>404 Not Found</body></html>") is False

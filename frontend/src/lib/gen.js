@@ -1,4 +1,4 @@
-// GEN is 18-decimal, wei-denominated on-chain (see contracts/verifiable_decease_escrow.py: WEI = 1).
+// GEN is 18-decimal, wei-denominated on-chain (see contracts/obolus.py: WEI = 1).
 const DECIMALS = 18n;
 const SCALE = 10n ** DECIMALS;
 

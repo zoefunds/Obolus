@@ -63,20 +63,28 @@ Three linked primitives:
    beneficiary) and *whose death unlocks it* (the subject — usually the grantor
    themself, but not required to be).
 2. **A claim** — anyone can say "I believe the subject has died, here's my evidence."
-   They post a bond as skin in the game. This opens a **contest window**.
+   They post a bond as skin in the game. This opens a **contest window**, timed off
+   the chain's own clock (not a caller-supplied timestamp — see §6).
 3. **A resolution** — once the window closes, anyone can trigger judgment. GenLayer
-   validators independently fetch every submitted URL, look at any attached images,
-   and each reach a categorical verdict. They must **agree exactly** on the verdict
-   category and confidence band for it to count — this is consensus, not one model's
-   opinion.
+   validators independently fetch every submitted URL (the claim's own evidence, plus
+   every contest filed against it), look at any attached images, and each reach a
+   categorical verdict. They must **agree exactly** on the verdict category and
+   confidence band for it to count — this is consensus, not one model's opinion.
 
 The verdict can only go three ways, and only one of them moves money:
 
 | Verdict | What it means | What happens |
 |---|---|---|
-| **CONFIRMED** (deceased, high confidence) | Evidence concretely and specifically names this subject as deceased | Vault balance → beneficiary. Claimant's bond returned. Any contester's bond is forfeited into the same payout. |
-| **REFUTED** (alive, high confidence) | Evidence concretely shows the subject was active/alive after the claim, or directly contradicts it | Nothing paid out. Claimant's bond is slashed into the vault. Contester's bond returned — they were right. |
-| **INCONCLUSIVE** (abstain) | Evidence is thin, ambiguous, contradictory, or unreachable | *Nothing happens to the vault.* Both bonds returned in full. A fresh claim can be tried later with better evidence. |
+| **CONFIRMED** (deceased, high confidence) | Evidence concretely and specifically names this subject as deceased | Vault balance → beneficiary. Claimant's bond returned. Every contester's bond (if any) is forfeited into the same payout. |
+| **REFUTED** (alive, high confidence) | Evidence concretely shows the subject was active/alive after the claim, or directly contradicts it | Nothing paid out. Claimant's bond is slashed into the vault. Every contester's bond returned to its own submitter — they were right. |
+| **INCONCLUSIVE** (abstain) | Evidence is thin, ambiguous, contradictory, or unreachable | *Nothing happens to the vault.* Claimant's bond AND every contester's bond returned in full. A fresh claim can be tried later with better evidence. |
+
+Claims can accumulate **multiple contests** — every counter-evidence submission is
+stored as its own row (append-only, up to `MAX_CONTESTS_PER_CLAIM = 20`), and every
+stored contest is fed into the same resolution round and routed individually. No
+contest can ever be edited or overwritten, including by its own submitter or a later
+contester — a stronger proof-of-life submission already on record can't be silently
+erased by whoever contests next.
 
 **Abstention is the default, not a failure mode.** Confidence itself is a category —
 LOW / MEDIUM / HIGH — never a number, and only HIGH ever flips a terminal state. A model
@@ -132,9 +140,12 @@ appointing a fixed committee.
 | Outcome | Vault balance | Claimant's bond | Contester's bond |
 |---|---|---|---|
 | Grantor cancels (no open claim) | → grantor, withdrawable | n/a | n/a |
-| `CONFIRMED` | → beneficiary, withdrawable | → returned to claimant | → forfeited into beneficiary's payout |
-| `REFUTED` | stays in vault, reopens `ACTIVE` | → forfeited into vault | → returned to contester |
-| `INCONCLUSIVE` | untouched, reopens `ACTIVE` | → returned to claimant | → returned to contester |
+| `CONFIRMED` | → beneficiary, withdrawable | → returned to claimant | → each forfeited into beneficiary's payout |
+| `REFUTED` | stays in vault, reopens `ACTIVE` | → forfeited into vault | → each returned to its own contester |
+| `INCONCLUSIVE` | untouched, reopens `ACTIVE` | → returned to claimant | → each returned to its own contester |
+
+("Contester's bond" is plural in practice — see §6 for why a claim can carry more than
+one.)
 
 **All payouts are pull-based.** A verdict only *credits* an internal balance; the actual
 transfer happens only when the recipient calls `withdraw()`. Check the **Balance** page
@@ -148,7 +159,7 @@ you've forgotten about.
 | **Grantor** | Create/fund a vault, change beneficiary, cancel — but *only* while the vault is `ACTIVE` with no open claim | Touch a vault once a claim is pending — these powers freeze the moment judgment starts |
 | **Beneficiary** | Withdraw once `PAYOUT_READY` | Nothing else — no vault-side powers |
 | **Claimant** | Anyone — submit a death claim with evidence + a bond | Force a verdict; the outcome is evidence-driven only |
-| **Contester** | Anyone — submit counter-evidence + a bond before the deadline | Force a verdict either; symmetric to the claimant |
+| **Contester** | Anyone — submit counter-evidence + a bond before the deadline; more than one person may contest the same claim | Force a verdict; edit or remove a previously stored contest, even their own |
 | **Resolver** | Anyone — trigger `resolve_claim` once the window closes | Nothing extra; permissionless, not a privileged action |
 | **Platform owner** | Pause/unpause new activity, set minimum bonds, transfer ownership | **Cannot ever move funds.** Explicitly cannot block `resolve_claim` or `withdraw` even while paused |
 
@@ -167,22 +178,36 @@ A **death claim** takes:
 - a free-text note (context only, e.g. "I'm his nephew" — never itself evidence).
 - a bond in GEN.
 
-A **contest** takes the mirror image: 1–5 URLs, one optional image, a bond. Only the
-most recent contest is kept per claim (resubmitting refunds the prior contester's bond
-first — no bond is ever silently lost).
+A **contest** takes the mirror image: 1–5 URLs, one optional image, a bond. Contests are
+**append-only** — each submission is stored as its own row (`get_contests_for_claim`
+returns the full list), capped at `MAX_CONTESTS_PER_CLAIM = 20` per claim. Nobody,
+including the original submitter, can edit or overwrite a stored contest; a stronger
+proof-of-life submission already on record can never be silently replaced by whoever
+files next. All stored contests are aggregated and fed into the same resolution round
+(bounded to `MAX_CONTEST_URLS_PER_RESOLUTION` total URLs, earliest-submitted first), and
+each contester's own bond is routed individually based on the final verdict — nobody's
+stake gets merged into someone else's.
 
 A dead/unreachable source is **never** treated as evidence of anything — the model is
 explicitly instructed that `FETCH_FAILED` is neutral, not suspicious.
 
+**Timing is chain-derived, not caller-supplied.** Every timestamp used for the contest
+window and resolution eligibility comes from the chain's own clock (`_chain_now_ts()`),
+not a `now_ts` argument a caller could pass in — an earlier design took a caller-supplied
+timestamp on several methods, which would have let a claim be timed by a spoofed value;
+that parameter has been removed from `create_vault`, `cancel_vault`,
+`submit_death_claim`, `contest_claim`, `resolve_claim`, and `is_resolvable`.
+
 ## 7. Architecture
 
 ```
-contracts/verifiable_decease_escrow.py   the Intelligent Contract itself (GenVM/Python)
+contracts/obolus.py                      the Intelligent Contract itself (GenVM/Python)
 examples/estate_planner_example.py       a worked consumer contract integration
-tests/direct/                            58+4 direct-mode pytest tests
+tests/direct/                            59+4 direct-mode pytest tests
 scripts/deploy.mjs                       deploys via genlayer-js (not the CLI — it hardcodes value: 0n)
 backend/                                 Express API — reads (cached), plus a relayer-signed write fallback
 frontend/                                React + Vite app — writes are signed by the connected wallet
+video/                                   demo video production materials (storyboard, voiceover, on-screen copy)
 ```
 
 ### How a write actually happens
@@ -225,9 +250,9 @@ cd Obolus
 npm install
 
 # Contract
-genvm-lint check contracts/verifiable_decease_escrow.py --json
+genvm-lint check contracts/obolus.py --json
 pip install -r requirements.txt
-pytest tests/direct/ -v          # 58 tests on the primitive, 4 on the consumer example
+pytest tests/direct/ -v          # 59 tests on the primitive, 4 on the consumer example
 
 # Configure
 cp .env.example .env
@@ -296,12 +321,14 @@ etc.) lives in [MEMORY.md](MEMORY.md) — worth reading before changing anything
 `fund_vault`, `set_beneficiary`, `cancel_vault`, `submit_death_claim`, `contest_claim`,
 `resolve_claim`, `withdraw`, `pause`, `unpause`, `set_minimum_bonds`, `set_owner`.
 
-**Contract views**: `get_vault`, `get_vault_count`, `get_claim`, `get_claims_for_vault`,
-`get_vaults_for_grantor`, `get_vaults_for_beneficiary`, `get_balance_of`,
-`is_resolvable`, `get_platform_stats`, `get_config`.
+**Contract views**: `get_vault`, `get_vault_count`, `get_claim`, `get_contests_for_claim`,
+`get_claims_for_vault`, `get_vaults_for_grantor`, `get_vaults_for_beneficiary`,
+`get_balance_of`, `is_resolvable`, `get_platform_stats`, `get_config`.
 
-Full docstrings live in
-[`contracts/verifiable_decease_escrow.py`](contracts/verifiable_decease_escrow.py).
+Full docstrings live in [`contracts/obolus.py`](contracts/obolus.py). `get_claim`'s
+response includes `contest_count` and `total_contester_bond_wei` (aggregates across all
+stored contests) rather than a single contester's fields — fetch the individual rows
+with `get_contests_for_claim` / `GET /claims/:id/contests`.
 
 **Backend REST surface** (`backend/src/routes/`), all under `/api/*` from the frontend:
 
@@ -318,6 +345,7 @@ Full docstrings live in
 | `POST /vaults/:id/cancel` | `cancel_vault` |
 | `POST /vaults/:vaultId/claims` | `submit_death_claim` |
 | `GET /claims/:id` | `get_claim` |
+| `GET /claims/:id/contests` | `get_contests_for_claim` |
 | `GET /claims/:id/resolvable` | `is_resolvable` |
 | `POST /claims/:id/contest` | `contest_claim` |
 | `POST /claims/:id/resolve` | `resolve_claim` |
@@ -330,14 +358,22 @@ Full docstrings live in
 
 ## 11. Known limitations
 
-- **The backend's relayer write routes are a fallback, not the primary path.** The
-  deployed frontend signs every write with the connected wallet; the backend's
-  `GENLAYER_PRIVATE_KEY`-signed routes exist for non-browser callers only.
+- **The backend's relayer write routes are a fallback, not the primary path — and are
+  currently unauthenticated.** The deployed frontend signs every write with the
+  connected wallet; the backend's `GENLAYER_PRIVATE_KEY`-signed routes exist for
+  non-browser callers only, but nothing currently stops anyone who finds the API from
+  calling them directly (including admin routes, if the relayer key is the owner). Add
+  an auth check in front of `backend/src/routes/*` writes, or remove the write routes
+  entirely, before treating this backend as a hardened public surface.
 - **`resolve_claim` can return `INCONCLUSIVE`** for perfectly true claims if the
   evidence submitted is thin, ambiguous, or unreachable — by design (see §2). Resubmit
   with stronger sourcing.
 - **Direct-mode contract tests cannot exercise a real cross-contract call** — see the
   contract's own module docstring and `tests/direct/test_estate_planner_example.py`.
+- **A claim's stored contests are bounded** (`MAX_CONTESTS_PER_CLAIM = 20`) — a hostile
+  actor spamming contests against one claim can't grow it unboundedly, but a
+  legitimately contested claim beyond that count would need a design change (this
+  hasn't come up in testing).
 - **Wallet-signed writes require GenLayer StudioNet support in your wallet.** The app
   prompts to add/switch the network automatically on connect; this needs standard EIP-1193
   support (`wallet_addEthereumChain`), which most injected wallets (MetaMask, Rabby, etc.)

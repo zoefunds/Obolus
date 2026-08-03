@@ -21,7 +21,7 @@ jobs:
 
       - name: Lint contracts
         run: |
-          genvm-lint check contracts/verifiable_decease_escrow.py --json
+          genvm-lint check contracts/obolus.py --json
           genvm-lint check examples/estate_planner_example.py --json
 
       - name: Direct-mode tests
