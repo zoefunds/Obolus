@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { readMethod, writeMethod } from "../contract.js";
 import { cached, invalidate } from "../cache.js";
+import { requireServiceKey } from "../auth.js";
 
 export const claimsRouter = Router();
 
@@ -38,6 +39,8 @@ claimsRouter.get("/:id/resolvable", async (req, res, next) => {
 
 // POST /vaults/:vaultId/claims
 // body: { evidenceUrlsJson, evidenceImageUrl, note, valueWei }
+// Mounted directly (not on claimsRouter) in server.js — see there for why
+// requireServiceKey is applied at the mount site instead of here.
 export const submitClaim = async (req, res, next) => {
   try {
     const { evidenceUrlsJson, evidenceImageUrl = "", note = "", valueWei = "0" } = req.body;
@@ -57,7 +60,7 @@ export const submitClaim = async (req, res, next) => {
 };
 
 // POST /claims/:id/contest  body: { contestUrlsJson, contestImageUrl, valueWei }
-claimsRouter.post("/:id/contest", async (req, res, next) => {
+claimsRouter.post("/:id/contest", requireServiceKey, async (req, res, next) => {
   try {
     const { contestUrlsJson, contestImageUrl = "", valueWei = "0" } = req.body;
     if (!contestUrlsJson) return res.status(400).json({ error: "contestUrlsJson is required (JSON array of URLs)" });
@@ -79,7 +82,7 @@ claimsRouter.post("/:id/contest", async (req, res, next) => {
 // This triggers the contract's single non-deterministic block (evidence
 // fetch + LLM verdict under validator consensus) — expect it to be slower
 // than the other writes.
-claimsRouter.post("/:id/resolve", async (req, res, next) => {
+claimsRouter.post("/:id/resolve", requireServiceKey, async (req, res, next) => {
   try {
     const result = await writeMethod("resolve_claim", [Number(req.params.id)]);
     await invalidate(`claim:${req.params.id}`);

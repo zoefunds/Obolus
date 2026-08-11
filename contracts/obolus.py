@@ -1,4 +1,4 @@
-# v0.2.16
+# v0.2.17
 # { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
 
 import datetime
@@ -93,10 +93,12 @@ MAX_CONTEST_WINDOW_SECONDS = 180 * 24 * 3600  # 180 days ceiling — sanity rail
 MAX_CONTESTS_PER_CLAIM = 20
 # Aggregate cap on contest URLs actually fed into one resolution round,
 # across ALL stored contests for a claim — independent of how many
-# contests exist. Earliest-submitted contests win the slots (see
-# _aggregate_contest_evidence): since a contest can never be edited or
-# removed, evidence already on record can never be pushed out by a later,
-# lower-quality submission trying to flood the aggregate.
+# contests exist. Slots are shared round-robin across every stored contest
+# (see _aggregate_contest_evidence), so no single contest — earlier or
+# later — can consume the whole budget and crowd out another bonded
+# contester's evidence from ever reaching resolution. A contest can never
+# be edited or removed, so evidence already on record can never be pushed
+# out by a later submission either.
 MAX_CONTEST_URLS_PER_RESOLUTION = MAX_CONTEST_URLS
 
 # GEN is 18-decimal; amounts are always u256 wei, never floats.
@@ -140,6 +142,43 @@ def _normalize_url(url: str, field: str) -> str:
     _require(
         u.startswith("https://") or u.startswith("http://"),
         f"{field} must start with http(s)://",
+    )
+    return u
+
+
+# A live page a claimant or contester merely links to is mutable by whoever
+# controls it — it can be edited (or taken down) between submission and the
+# moment resolve_claim's nondet round actually fetches it, letting an
+# interested party swap in different content after the fact. Wayback
+# Machine snapshots are the cheapest widely-available commitment mechanism:
+# a given https://web.archive.org/web/<timestamp>/<original-url> permalink
+# is fixed at capture time and cannot be edited by the page's operator, the
+# submitter, or anyone else after the fact. Every evidence/contest URL
+# (text and image) is required to be such a snapshot, not a live page.
+_ARCHIVE_URL_PREFIXES = ("https://web.archive.org/web/", "http://web.archive.org/web/")
+
+
+def _require_committed_url(url: str, field: str) -> str:
+    u = _normalize_url(url, field)
+    _require(
+        u.startswith(_ARCHIVE_URL_PREFIXES),
+        f"{field} must be a Wayback Machine snapshot URL "
+        "(https://web.archive.org/web/<timestamp>/<original-url>), not a live page — "
+        "a live page can be edited after submission, but an archive.org snapshot is "
+        "fixed at the moment it was captured. Archive the source at "
+        "https://web.archive.org/save/<url> first, then submit the resulting link.",
+    )
+    rest = u.split("/web/", 1)[1]
+    segments = rest.split("/", 1)
+    _require(
+        len(segments) == 2 and len(segments[1]) > 0,
+        f"{field} is missing the archived original URL after the timestamp segment",
+    )
+    timestamp = segments[0]
+    ts_digits = timestamp[:14]
+    _require(
+        len(timestamp) >= 14 and ts_digits.isdigit(),
+        f"{field} has a malformed Wayback Machine timestamp segment",
     )
     return u
 
@@ -191,7 +230,11 @@ def _is_zero_address(addr: Address) -> bool:
 
 def _parse_urls_json(raw: str, field: str, max_count: int) -> list[str]:
     """Parse a JSON array of evidence URLs from calldata. Tolerates an
-    already-decoded list (some SDK paths pre-parse JSON string params)."""
+    already-decoded list (some SDK paths pre-parse JSON string params).
+    Every URL must be a Wayback Machine snapshot — see
+    _require_committed_url — so evidence is bound to content committed at
+    submission time, not whatever a mutable live page happens to say by
+    the time resolve_claim's nondet round fetches it."""
     if isinstance(raw, list):
         items = raw
     else:
@@ -201,7 +244,7 @@ def _parse_urls_json(raw: str, field: str, max_count: int) -> list[str]:
             raise gl.vm.UserError(ERR_EXPECTED + f"{field} is not valid JSON")
     _require(isinstance(items, list), f"{field} must be a JSON array")
     _require(len(items) <= max_count, f"{field} allows at most {max_count} URLs")
-    return [_normalize_url(str(u), field) for u in items]
+    return [_require_committed_url(str(u), field) for u in items]
 
 
 def _sanitize_json_text(text: str) -> str:
@@ -751,11 +794,14 @@ class VerifiableDeceaseEscrow(gl.Contract):
 
         Args:
             vault_id: target vault.
-            evidence_urls_json: JSON array of 1..5 public URLs corroborating
-                the death (obituary, registry, news).
-            evidence_image_url: optional single URL to a page/photo showing
-                a certificate or obituary, rendered as a screenshot during
-                resolution. "" for none.
+            evidence_urls_json: JSON array of 1..5 Wayback Machine snapshot
+                URLs (https://web.archive.org/web/<timestamp>/<url>)
+                corroborating the death (obituary, registry, news). A live,
+                unarchived URL is rejected — it is editable by whoever
+                controls it after submission, which a snapshot is not.
+            evidence_image_url: optional single Wayback Machine snapshot URL
+                to a page/photo showing a certificate or obituary, rendered
+                as a screenshot during resolution. "" for none.
             note: free-text context, e.g. relationship to the subject.
 
         Returns: the new claim id.
@@ -772,7 +818,7 @@ class VerifiableDeceaseEscrow(gl.Contract):
         _require(len(urls) >= 1, "at least one evidence URL is required")
         image_url = ""
         if evidence_image_url and evidence_image_url.strip():
-            image_url = _normalize_url(evidence_image_url, "evidence_image_url")
+            image_url = _require_committed_url(evidence_image_url, "evidence_image_url")
         _require(len(note) <= MAX_NOTE_LEN, f"note exceeds {MAX_NOTE_LEN} chars")
 
         claim_id = int(self.claim_count) + 1
@@ -814,7 +860,11 @@ class VerifiableDeceaseEscrow(gl.Contract):
     ) -> None:
         """Submit counter-evidence against an OPEN claim before its contest
         deadline — e.g. a fresh, dated public appearance, or a "proof of
-        life" photo/screenshot. Anyone may contest, not only the grantor:
+        life" photo/screenshot. Every URL must be a Wayback Machine
+        snapshot (https://web.archive.org/web/<timestamp>/<url>), not a
+        live page, for the same reason death-evidence URLs are: a live
+        page is editable by whoever controls it right up until (and after)
+        resolve_claim fetches it. Anyone may contest, not only the grantor:
         a co-heir or acquaintance may have evidence the grantor cannot
         submit themself (including the case where the grantor's own keys
         are the ones actually lost, which is exactly the ambiguity this
@@ -847,7 +897,7 @@ class VerifiableDeceaseEscrow(gl.Contract):
         _require(len(urls) >= 1, "at least one contest URL is required")
         image_url = ""
         if contest_image_url and contest_image_url.strip():
-            image_url = _normalize_url(contest_image_url, "contest_image_url")
+            image_url = _require_committed_url(contest_image_url, "contest_image_url")
 
         contest_id = int(self.contest_count) + 1
         self.contest_count = u64(contest_id)
@@ -869,23 +919,41 @@ class VerifiableDeceaseEscrow(gl.Contract):
 
     def _aggregate_contest_evidence(self, contests: list[Contest]) -> tuple[list[str], str]:
         """Flatten every stored (append-only) contest into the URL list and
-        single image handed to resolution. Earliest-submitted contests fill
-        the aggregate URL slots first — since contests can never be edited
-        or removed, evidence already on record can never be pushed out of
-        the resolution round by a later, lower-quality flood of URLs. The
-        single contest image slot (matching the existing 2-image-total
-        budget: one death, one contest) is likewise the first non-empty
-        image among all stored contests, in submission order."""
+        single image handed to resolution.
+
+        Every bonded contest gets a fair shot at the aggregate URL slots,
+        round-robin by submission order (contest 1's first URL, contest 2's
+        first URL, ..., then contest 1's second URL, ...) rather than
+        first-come-first-served. A single early contest that maxes out its
+        own 5-URL submission can no longer consume the entire
+        MAX_CONTEST_URLS_PER_RESOLUTION budget and crowd out every later
+        contester's evidence from ever reaching the resolution round — each
+        contest is still guaranteed at least one slot (up to the number of
+        contests) before any contest gets a second. Contests remain
+        append-only and immutable; this only changes how the fixed
+        resolution-round budget is shared across them.
+
+        The single contest image slot (matching the existing 2-image-total
+        budget: one death, one contest) is inherently a single pick — it
+        goes to the first contest (in submission order) that supplied one,
+        same fairness rule the URL round-robin uses (earliest not-yet-seen
+        contribution wins ties)."""
         urls: list[str] = []
         image_url = ""
+        contest_urls = [json.loads(c.urls_json) if c.urls_json else [] for c in contests]
+        max_len = max((len(u) for u in contest_urls), default=0)
+        for round_idx in range(max_len):
+            if len(urls) >= MAX_CONTEST_URLS_PER_RESOLUTION:
+                break
+            for per_contest in contest_urls:
+                if len(urls) >= MAX_CONTEST_URLS_PER_RESOLUTION:
+                    break
+                if round_idx < len(per_contest):
+                    urls.append(per_contest[round_idx])
         for contest in contests:
-            if len(urls) < MAX_CONTEST_URLS_PER_RESOLUTION:
-                for u in json.loads(contest.urls_json) if contest.urls_json else []:
-                    if len(urls) >= MAX_CONTEST_URLS_PER_RESOLUTION:
-                        break
-                    urls.append(u)
-            if not image_url and contest.image_url:
+            if contest.image_url:
                 image_url = contest.image_url
+                break
         return urls, image_url
 
     # ========================================================================

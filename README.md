@@ -172,21 +172,30 @@ that's been lost.
 
 A **death claim** takes:
 - 1–5 evidence URLs (obituary, registry, news) — fetched live by validators as text, not
-  trusted as typed-in claims.
-- an optional single image URL (certificate/obituary page) — captured as a screenshot or
-  raw image and shown to the model visually.
+  trusted as typed-in claims. Every URL must be a **Wayback Machine snapshot**
+  (`https://web.archive.org/web/<timestamp>/<original-url>`), not a live page — a live
+  page is editable (or removable) by whoever controls it at any point between submission
+  and the moment `resolve_claim`'s nondet round actually fetches it, which is exactly the
+  gap an interested party could otherwise exploit to swap in different content after the
+  fact. Archive a source at `https://web.archive.org/save/<url>` first, then submit the
+  resulting permalink. (`_require_committed_url` in `contracts/obolus.py` enforces this.)
+- an optional single image URL (certificate/obituary page), same Wayback-snapshot
+  requirement — captured as a screenshot or raw image and shown to the model visually.
 - a free-text note (context only, e.g. "I'm his nephew" — never itself evidence).
 - a bond in GEN.
 
-A **contest** takes the mirror image: 1–5 URLs, one optional image, a bond. Contests are
-**append-only** — each submission is stored as its own row (`get_contests_for_claim`
-returns the full list), capped at `MAX_CONTESTS_PER_CLAIM = 20` per claim. Nobody,
-including the original submitter, can edit or overwrite a stored contest; a stronger
-proof-of-life submission already on record can never be silently replaced by whoever
-files next. All stored contests are aggregated and fed into the same resolution round
-(bounded to `MAX_CONTEST_URLS_PER_RESOLUTION` total URLs, earliest-submitted first), and
-each contester's own bond is routed individually based on the final verdict — nobody's
-stake gets merged into someone else's.
+A **contest** takes the mirror image: 1–5 archived URLs, one optional archived image, a
+bond. Contests are **append-only** — each submission is stored as its own row
+(`get_contests_for_claim` returns the full list), capped at `MAX_CONTESTS_PER_CLAIM = 20`
+per claim. Nobody, including the original submitter, can edit or overwrite a stored
+contest; a stronger proof-of-life submission already on record can never be silently
+replaced by whoever files next. All stored contests are aggregated and fed into the same
+resolution round (bounded to `MAX_CONTEST_URLS_PER_RESOLUTION` total URLs, shared
+**round-robin across every stored contest** — see `_aggregate_contest_evidence` — so one
+early contest maxing out its own 5-URL submission can't consume the whole budget and
+crowd a later, equally-bonded contester's evidence out of the resolution round entirely),
+and each contester's own bond is routed individually based on the final verdict —
+nobody's stake gets merged into someone else's.
 
 A dead/unreachable source is **never** treated as evidence of anything — the model is
 explicitly instructed that `FETCH_FAILED` is neutral, not suspicious.
@@ -223,8 +232,15 @@ on the wrong chain.
 The backend's `/vaults`, `/claims`, `/admin` **write** routes still exist
 (`backend/src/contract.js`, signed by a `GENLAYER_PRIVATE_KEY` relayer key), kept as an
 alternative API surface for non-browser callers — scripts, other services — but the
-deployed frontend doesn't call them. Reads always go through the backend: cached
-(Redis, 5–15s TTL) and cheap, no signature needed.
+deployed frontend doesn't call them. Every one of these routes is gated behind
+`backend/src/auth.js`'s `requireServiceKey` middleware: the caller must send a
+`x-service-key` header matching the server's `BACKEND_SERVICE_KEY` env var, or the route
+502s/401s. With no `BACKEND_SERVICE_KEY` configured (the default), the whole relayer
+write surface is disabled — since the relayer key signs on behalf of whoever calls it
+(not the caller's own identity) and may itself be the contract owner, an unauthenticated
+route here would let anyone move funds through the relayer or call the owner-only
+`/admin/*` routes. Reads always go through the backend: cached (Redis, 5–15s TTL) and
+cheap, no signature needed, no service key required.
 
 ### Admin surface
 
@@ -258,7 +274,8 @@ pytest tests/direct/ -v          # 59 tests on the primitive, 4 on the consumer 
 cp .env.example .env
 # fill in GENLAYER_PRIVATE_KEY (only needed for scripts/deploy.mjs and the backend's
 # relayer write fallback — the deployed frontend signs with a browser wallet instead),
-# VDE_CONTRACT_ADDRESS (skip this if you're about to deploy your own), REDIS_URL (optional)
+# VDE_CONTRACT_ADDRESS (skip this if you're about to deploy your own), REDIS_URL (optional),
+# BACKEND_SERVICE_KEY (only needed if you actually want the relayer write fallback enabled)
 
 # Deploy your own contract instance (writes VDE_CONTRACT_ADDRESS into .env)
 node scripts/deploy.mjs
@@ -287,6 +304,7 @@ flyctl secrets set \
   VDE_CONTRACT_ADDRESS=0x... \
   GENLAYER_PRIVATE_KEY=0x... \
   REDIS_URL=rediss://... \
+  BACKEND_SERVICE_KEY=$(openssl rand -hex 32) \
   --app <your-app-name>
 flyctl deploy --config fly.toml --dockerfile backend/Dockerfile --app <your-app-name>
 
@@ -358,13 +376,14 @@ with `get_contests_for_claim` / `GET /claims/:id/contests`.
 
 ## 11. Known limitations
 
-- **The backend's relayer write routes are a fallback, not the primary path — and are
-  currently unauthenticated.** The deployed frontend signs every write with the
-  connected wallet; the backend's `GENLAYER_PRIVATE_KEY`-signed routes exist for
-  non-browser callers only, but nothing currently stops anyone who finds the API from
-  calling them directly (including admin routes, if the relayer key is the owner). Add
-  an auth check in front of `backend/src/routes/*` writes, or remove the write routes
-  entirely, before treating this backend as a hardened public surface.
+- **The backend's relayer write routes are a fallback, not the primary path.** The
+  deployed frontend signs every write with the connected wallet; the backend's
+  `GENLAYER_PRIVATE_KEY`-signed routes exist for non-browser callers only, and are gated
+  by `backend/src/auth.js`'s `requireServiceKey` middleware — a caller must present the
+  `x-service-key` header matching `BACKEND_SERVICE_KEY`, and with no
+  `BACKEND_SERVICE_KEY` configured the routes are disabled outright (503), including the
+  owner-only `/admin/*` routes. If you don't have a real non-browser caller for this
+  surface, leave `BACKEND_SERVICE_KEY` unset rather than issuing a key.
 - **`resolve_claim` can return `INCONCLUSIVE`** for perfectly true claims if the
   evidence submitted is thin, ambiguous, or unreachable — by design (see §2). Resubmit
   with stronger sourcing.

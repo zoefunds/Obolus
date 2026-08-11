@@ -45,8 +45,17 @@ CLAIMANT = create_address("claimant")
 CONTESTER = create_address("contester")
 STRANGER = create_address("stranger")
 
-DEATH_URLS = json.dumps(["https://news.example.com/obituary", "https://registry.example.gov/death/123"])
-CONTEST_URLS = json.dumps(["https://social.example.com/live-post-today"])
+def archived(url: str, ts: str = "20240101000000") -> str:
+    """Wrap a URL as a Wayback Machine snapshot link — the contract now
+    requires every evidence/contest URL to be a committed archive.org
+    snapshot, not a live (mutable) page. See _require_committed_url."""
+    return f"https://web.archive.org/web/{ts}/{url}"
+
+
+DEATH_URLS = json.dumps(
+    [archived("https://news.example.com/obituary"), archived("https://registry.example.gov/death/123")]
+)
+CONTEST_URLS = json.dumps([archived("https://social.example.com/live-post-today")])
 
 
 def fresh(vm, claimant_bond=0, contester_bond=0):
@@ -387,14 +396,14 @@ def test_second_contest_appends_without_erasing_first(vm):
     vid = make_vault(vm, c, window=DAY)
     cid = open_claim(vm, c, vid, now_ts=NOW)
 
-    first_urls = json.dumps(["https://social.example.com/first-contester-proof"])
+    first_urls = json.dumps([archived("https://social.example.com/first-contester-proof")])
     vm.sender = CONTESTER
     vm.value = GEN // 100
     warp(vm, NOW + HOUR)
     c.contest_claim(cid, first_urls, "")
 
     second_contester = create_address("second_contester")
-    second_urls = json.dumps(["https://social.example.com/second-contester-proof"])
+    second_urls = json.dumps([archived("https://social.example.com/second-contester-proof")])
     vm.sender = second_contester
     vm.value = GEN // 100
     warp(vm, NOW + 2 * HOUR)
@@ -411,9 +420,9 @@ def test_second_contest_appends_without_erasing_first(vm):
     contests = c.get_contests_for_claim(cid)
     assert len(contests) == 2
     assert contests[0]["contester"].lower() == hx(CONTESTER).lower()
-    assert contests[0]["urls"] == ["https://social.example.com/first-contester-proof"]
+    assert contests[0]["urls"] == [archived("https://social.example.com/first-contester-proof")]
     assert contests[1]["contester"].lower() == hx(second_contester).lower()
-    assert contests[1]["urls"] == ["https://social.example.com/second-contester-proof"]
+    assert contests[1]["urls"] == [archived("https://social.example.com/second-contester-proof")]
 
 
 def test_contest_limit_per_claim_enforced(vm):

@@ -185,11 +185,24 @@ function ContestForm({ claimId, glClient, onSubmitted }) {
   return (
     <form onSubmit={submit} className="space-y-4">
       <ErrorBanner message={error} />
-      <Field label="Counter-evidence URLs" hint="One per line, up to 5. Proof the subject is alive, or that the death claim is mistaken.">
-        <Textarea rows={3} value={urls} onChange={(e) => setUrls(e.target.value)} placeholder={"https://...\nhttps://..."} required />
+      <Field
+        label="Counter-evidence URLs"
+        hint="One per line, up to 5. Proof the subject is alive, or that the death claim is mistaken. Must be Wayback Machine snapshots (web.archive.org/web/...), not live pages."
+      >
+        <Textarea
+          rows={3}
+          value={urls}
+          onChange={(e) => setUrls(e.target.value)}
+          placeholder={"https://web.archive.org/web/20240101000000/https://..."}
+          required
+        />
       </Field>
-      <Field label="Optional image URL">
-        <Input value={imageUrl} onChange={(e) => setImageUrl(e.target.value)} placeholder="https://..." />
+      <Field label="Optional image URL" hint="Also a Wayback Machine snapshot URL, not a live page.">
+        <Input
+          value={imageUrl}
+          onChange={(e) => setImageUrl(e.target.value)}
+          placeholder="https://web.archive.org/web/20240101000000/https://..."
+        />
       </Field>
       <Field label="Bond (GEN)">
         <Input type="number" step="any" min="0" value={bondGen} onChange={(e) => setBondGen(e.target.value)} required />

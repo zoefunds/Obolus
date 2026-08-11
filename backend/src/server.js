@@ -6,6 +6,7 @@ import cors from "cors";
 import { vaultsRouter } from "./routes/vaults.js";
 import { claimsRouter, submitClaim } from "./routes/claims.js";
 import { miscRouter } from "./routes/misc.js";
+import { requireServiceKey } from "./auth.js";
 
 // See genlayerClient.js for why this can't be a bare `dotenv/config` import.
 loadEnv({ path: path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../.env") });
@@ -31,7 +32,7 @@ app.use(express.json());
 app.get("/health", (_req, res) => res.json({ ok: true, service: "obolus-backend" }));
 
 app.use("/vaults", vaultsRouter);
-app.post("/vaults/:vaultId/claims", submitClaim);
+app.post("/vaults/:vaultId/claims", requireServiceKey, submitClaim);
 app.use("/claims", claimsRouter);
 app.use("/", miscRouter);
 

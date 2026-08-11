@@ -2,6 +2,7 @@ import { Router } from "express";
 import { readMethod, writeMethod } from "../contract.js";
 import { cached, invalidate } from "../cache.js";
 import { CONTRACT_ADDRESS } from "../genlayerClient.js";
+import { requireServiceKey } from "../auth.js";
 
 export const miscRouter = Router();
 
@@ -27,7 +28,7 @@ miscRouter.get("/balances/:address", async (req, res, next) => {
 });
 
 // POST /balances/withdraw  body: { amountWei }
-miscRouter.post("/balances/withdraw", async (req, res, next) => {
+miscRouter.post("/balances/withdraw", requireServiceKey, async (req, res, next) => {
   try {
     const { amountWei } = req.body;
     if (!amountWei) return res.status(400).json({ error: "amountWei is required" });
@@ -58,7 +59,7 @@ miscRouter.get("/platform/config", async (_req, res, next) => {
 
 // ---- owner-only admin (server signer must be the current contract owner) ----
 
-miscRouter.post("/admin/pause", async (_req, res, next) => {
+miscRouter.post("/admin/pause", requireServiceKey, async (_req, res, next) => {
   try {
     res.json(await writeMethod("pause", []));
     await invalidate("platform_stats");
@@ -67,7 +68,7 @@ miscRouter.post("/admin/pause", async (_req, res, next) => {
   }
 });
 
-miscRouter.post("/admin/unpause", async (_req, res, next) => {
+miscRouter.post("/admin/unpause", requireServiceKey, async (_req, res, next) => {
   try {
     res.json(await writeMethod("unpause", []));
     await invalidate("platform_stats");
@@ -77,7 +78,7 @@ miscRouter.post("/admin/unpause", async (_req, res, next) => {
 });
 
 // body: { minClaimantBondWei, minContesterBondWei }
-miscRouter.post("/admin/minimum-bonds", async (req, res, next) => {
+miscRouter.post("/admin/minimum-bonds", requireServiceKey, async (req, res, next) => {
   try {
     const { minClaimantBondWei = 0, minContesterBondWei = 0 } = req.body;
     res.json(await writeMethod("set_minimum_bonds", [Number(minClaimantBondWei), Number(minContesterBondWei)]));
@@ -88,7 +89,7 @@ miscRouter.post("/admin/minimum-bonds", async (req, res, next) => {
 });
 
 // body: { newOwner }
-miscRouter.post("/admin/owner", async (req, res, next) => {
+miscRouter.post("/admin/owner", requireServiceKey, async (req, res, next) => {
   try {
     const { newOwner } = req.body;
     if (!newOwner) return res.status(400).json({ error: "newOwner is required" });

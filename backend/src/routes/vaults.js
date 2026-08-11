@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { readMethod, writeMethod } from "../contract.js";
 import { cached, invalidate } from "../cache.js";
+import { requireServiceKey } from "../auth.js";
 
 export const vaultsRouter = Router();
 
@@ -36,7 +37,7 @@ vaultsRouter.get("/:id/claims", async (req, res, next) => {
 
 // POST /vaults
 // body: { beneficiary, subjectName, subjectAkaJson, subjectBirthYear, contestWindowSeconds, valueWei }
-vaultsRouter.post("/", async (req, res, next) => {
+vaultsRouter.post("/", requireServiceKey, async (req, res, next) => {
   try {
     const {
       beneficiary,
@@ -64,7 +65,7 @@ vaultsRouter.post("/", async (req, res, next) => {
 });
 
 // POST /vaults/:id/fund  body: { valueWei }
-vaultsRouter.post("/:id/fund", async (req, res, next) => {
+vaultsRouter.post("/:id/fund", requireServiceKey, async (req, res, next) => {
   try {
     const { valueWei } = req.body;
     if (!valueWei) return res.status(400).json({ error: "valueWei is required" });
@@ -77,7 +78,7 @@ vaultsRouter.post("/:id/fund", async (req, res, next) => {
 });
 
 // POST /vaults/:id/beneficiary  body: { newBeneficiary }
-vaultsRouter.post("/:id/beneficiary", async (req, res, next) => {
+vaultsRouter.post("/:id/beneficiary", requireServiceKey, async (req, res, next) => {
   try {
     const { newBeneficiary } = req.body;
     if (!newBeneficiary) return res.status(400).json({ error: "newBeneficiary is required" });
@@ -90,7 +91,7 @@ vaultsRouter.post("/:id/beneficiary", async (req, res, next) => {
 });
 
 // POST /vaults/:id/cancel
-vaultsRouter.post("/:id/cancel", async (req, res, next) => {
+vaultsRouter.post("/:id/cancel", requireServiceKey, async (req, res, next) => {
   try {
     const result = await writeMethod("cancel_vault", [Number(req.params.id)]);
     await invalidate(`vault:${req.params.id}`);

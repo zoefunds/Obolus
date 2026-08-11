@@ -76,12 +76,34 @@ export default function SubmitClaimPage() {
         <form className="p-8 space-y-6" onSubmit={handleSubmit}>
           <ErrorBanner message={error} />
 
-          <Field label="Evidence URLs" hint="One per line, 1–5 required. Obituary, death registry, or credible news.">
-            <Textarea rows={4} value={urls} onChange={(e) => setUrls(e.target.value)} placeholder={"https://...\nhttps://..."} required />
+          <Field
+            label="Evidence URLs"
+            hint={
+              <>
+                One per line, 1–5 required. Obituary, death registry, or credible news. Must be Wayback Machine
+                snapshots, not live pages (a live page can be edited after you submit it) — archive a source at{" "}
+                <a href="https://web.archive.org/save/" target="_blank" rel="noreferrer" className="underline">
+                  web.archive.org/save
+                </a>{" "}
+                first, then paste the resulting link.
+              </>
+            }
+          >
+            <Textarea
+              rows={4}
+              value={urls}
+              onChange={(e) => setUrls(e.target.value)}
+              placeholder={"https://web.archive.org/web/20240101000000/https://...\nhttps://web.archive.org/web/20240101000000/https://..."}
+              required
+            />
           </Field>
 
-          <Field label="Optional certificate / obituary image URL">
-            <Input value={imageUrl} onChange={(e) => setImageUrl(e.target.value)} placeholder="https://..." />
+          <Field label="Optional certificate / obituary image URL" hint="Also a Wayback Machine snapshot URL, not a live page.">
+            <Input
+              value={imageUrl}
+              onChange={(e) => setImageUrl(e.target.value)}
+              placeholder="https://web.archive.org/web/20240101000000/https://..."
+            />
           </Field>
 
           <Field label="Note" hint="Context only — e.g. your relationship to the subject. Not itself evidence.">
