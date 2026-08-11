@@ -16,7 +16,7 @@ single, high-stakes question: *has this specific named person died?*
 **Live:**
 - App: [obolus-app.vercel.app](https://obolus-app.vercel.app)
 - API: [obolus-backend.fly.dev](https://obolus-backend.fly.dev)
-- Contract: `0x82a1e87F2Abc790B950fD645E6D7A5aC27F43f91` on GenLayer StudioNet
+- Contract: `0x62dE8cd09b09721d665C4ec14aFAaDbDf15bdFdc` on GenLayer StudioNet
 
 ---
 
@@ -33,6 +33,10 @@ single, high-stakes question: *has this specific named person died?*
 9. [Deployment](#9-deployment)
 10. [API reference](#10-api-reference)
 11. [Known limitations](#11-known-limitations)
+
+See [REVIEW.md](REVIEW.md) for a detailed record of the security fixes below (§6, §7,
+§11): committed evidence sources, fair contest-evidence aggregation, and the
+authenticated relayer write surface.
 
 ---
 
@@ -397,3 +401,11 @@ with `get_contests_for_claim` / `GET /claims/:id/contests`.
   prompts to add/switch the network automatically on connect; this needs standard EIP-1193
   support (`wallet_addEthereumChain`), which most injected wallets (MetaMask, Rabby, etc.)
   provide.
+- **Wayback Machine snapshots bind evidence to committed content, not to truth.** A
+  snapshot proves "this page said X at capture time" — it doesn't prove X was accurate,
+  and a submitter could in principle archive a page they themselves control right after
+  editing it to say whatever they want, then submit that snapshot. This closes the
+  specific gap the review flagged (content changing between submission and resolution),
+  it doesn't make every archived source trustworthy — the LLM verdict still has to weigh
+  source credibility (a named registry vs. an anonymous blog) the same way it always did.
+  See [REVIEW.md](REVIEW.md) §1.
