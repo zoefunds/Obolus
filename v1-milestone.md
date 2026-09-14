@@ -11,9 +11,8 @@ entirely in a purpose-built escrow contract on Base Sepolia.
 GEN is GenLayer's native gas/value token — fine for a hackathon demo, but not what a real
 inheritance product should hold value in. USDC is the asset people actually want their
 estate denominated in, and Base Sepolia gives a real EVM chain with real USDC (Circle's
-official Base Sepolia deployment) to hold it. This also follows the same split-chain
-pattern already proven in two sibling GenLayer projects on this machine (`meme-olympics`,
-`Event-Weaver`): **GenLayer judges, a Base contract custodies.**
+official Base Sepolia deployment) to hold it. This follows a split-chain design:
+**GenLayer judges, a Base contract custodies.**
 
 ## Architecture
 

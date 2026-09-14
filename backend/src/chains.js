@@ -8,6 +8,6 @@
 // consensus contract is only ever populated by successfully calling the
 // simulator-only `sim_getConsensusContract` RPC method. Upgrading to a
 // current genlayer-js and using its real `studionet` export removes the
-// need for any of that. Verified against `~/Event-Weaver`, a separate
-// GenLayer project on this machine with confirmed-working StudioNet writes.
+// need for any of that. Verified against a separate, confirmed-working
+// StudioNet write implementation.
 export { studionet, localnet } from "genlayer-js/chains";

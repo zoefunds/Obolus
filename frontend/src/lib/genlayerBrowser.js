@@ -8,10 +8,8 @@
 // that's why writes silently never went through: `simulator`'s consensus
 // contract only ever gets populated by the simulator-only
 // `sim_getConsensusContract` RPC call, which Studio's hosted RPC doesn't
-// answer the same way `simulator` expects. Verified against
-// `~/Event-Weaver`, a separate GenLayer project on this machine with
-// confirmed-working StudioNet wallet writes, whose `frontend/src/lib/wallet.tsx`
-// this file mirrors closely.
+// answer the same way `simulator` expects. Verified against a separate,
+// confirmed-working StudioNet wallet-write implementation.
 //
 // The `account` passed to `createClient` is the connected wallet's address
 // as a plain string (not a local private-key account object) — that's what
@@ -60,7 +58,8 @@ export async function walletWriteContract(walletClient, { address, functionName,
   await ensureStudioNetwork();
   const txHash = await walletClient.writeContract({ address, functionName, args, value, account: walletClient.account });
   // ACCEPTED, not FINALIZED — see backend/src/contract.js's writeMethod for
-  // why. interval/retries mirror ~/Event-Weaver's confirmed-working values.
+  // why. interval/retries mirror confirmed-working values from a prior
+  // StudioNet integration.
   // fullTransaction: true is required to get the leader receipt's raw
   // return-value bytes back (genlayer-js strips them from the default
   // "simplified" receipt, leaving only a human-readable string) — see

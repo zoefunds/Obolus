@@ -36,15 +36,15 @@ export async function readMethod(functionName, args = []) {
   return toPlain(result);
 }
 
-// value: bigint wei to attach (for payable writes: create_vault, fund_vault,
-// submit_death_claim, contest_claim).
-export async function writeMethod(functionName, args = [], value = 0n) {
+// The contract is value-free since the USDC migration (see MEMORY.md):
+// every write takes declared *_usdc amounts as plain arguments, never
+// attached native value, so writeMethod no longer needs a `value` param.
+export async function writeMethod(functionName, args = []) {
   const account = requireAccount();
   const txHash = await client.writeContract({
     address: needAddress(),
     functionName,
     args,
-    value,
     account,
   });
   // Wait for ACCEPTED, not FINALIZED — FINALIZED only lands after
@@ -52,9 +52,9 @@ export async function writeMethod(functionName, args = [], value = 0n) {
   // know the write executed and read back its result; waiting for it is
   // what made writes look like they "weren't going through" (the request
   // just kept polling long after the tx had actually succeeded).
-  // interval/retries mirror the confirmed-working values from
-  // ~/Event-Weaver's backend/src/resolver.js, widened for resolve_claim's
-  // longer nondet round (evidence fetch + LLM verdict + validator consensus).
+  // interval/retries mirror confirmed-working values from a prior
+  // StudioNet integration, widened for resolve_claim's longer nondet round
+  // (evidence fetch + LLM verdict + validator consensus).
   const receipt = await client.waitForTransactionReceipt({ hash: txHash, status: "ACCEPTED", interval: 4000, retries: 90 });
   return { txHash, receipt: toPlain(receipt) };
 }

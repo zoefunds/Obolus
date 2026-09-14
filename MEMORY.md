@@ -117,9 +117,9 @@ hack looked plausible — same RPC surface, `sim_getConsensusContract` exists on
 succeeding against `simulator`'s *own* expected shape, and it silently never did against
 Studio, so every value-carrying write failed to find a consensus contract to call.
 
-Found the actual fix by reading a second, separate GenLayer project on this machine
-(`~/Event-Weaver`) that has confirmed-working StudioNet writes: it uses
-`genlayer-js@1.1.8`, which ships a **real** `studionet` chain export — correct RPC URL,
+Found the actual fix by reading a separate, confirmed-working StudioNet write
+implementation: it uses `genlayer-js@1.1.8`, which ships a **real** `studionet` chain
+export — correct RPC URL,
 correct chain id, and a hardcoded `consensusMainContract` address + ABI baked into the
 SDK itself, no runtime discovery needed at all. Upgraded this project to `genlayer-js@^1.1.8`
 everywhere (root, backend, frontend) and deleted the `simulator`-mutation hack entirely —
@@ -128,8 +128,8 @@ imports `studionet` directly.
 
 **Second, related bug fixed at the same time:** every `waitForTransactionReceipt` call
 was waiting for `"FINALIZED"` status, which only lands after StudioNet's appeal window
-closes — far later than needed to know the write executed. `~/Event-Weaver` waits for
-`"ACCEPTED"` instead (interval 4-5s, 60-90 retries). Changed both
+closes — far later than needed to know the write executed. The confirmed-working
+implementation above waits for `"ACCEPTED"` instead (interval 4-5s, 60-90 retries). Changed both
 `backend/src/contract.js` and `frontend/src/lib/genlayerBrowser.js` to match.
 
 **Confirmed live**, not just by reading source this time: called `POST /admin/unpause`

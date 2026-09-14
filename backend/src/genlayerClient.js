@@ -40,15 +40,15 @@ if (!account) {
   console.warn("No usable GENLAYER_PRIVATE_KEY configured — this instance can serve reads only; every write will fail with 503.");
 }
 
-// One client reused across requests, matching the confirmed-working
-// pattern from ~/Event-Weaver's backend/src/genlayer.js: a plain
-// `createClient({ chain })` with no account handles reads fine on
-// genlayer-js@1.1.8+ (the "window is not defined" issue that forced an
-// ephemeral-account workaround was specific to @0.8.0's transport). Real
-// GEN moves through this client's writeContract({ value }) — see
-// contract.js's writeMethod, which passes the REAL signing account
-// explicitly per call via requireAccount() — never a simulated/mocked
-// balance.
+// One client reused across requests. A plain `createClient({ chain })`
+// with no account handles reads fine on genlayer-js@1.1.8+ (the "window
+// is not defined" issue that forced an ephemeral-account workaround was
+// specific to @0.8.0's transport). Writes go through this client's
+// writeContract() — see contract.js's writeMethod, which passes the REAL
+// signing account explicitly per call via requireAccount() — never a
+// simulated/mocked account. The contract itself is value-free since the
+// USDC migration (see MEMORY.md): writes carry declared amounts as plain
+// arguments, not attached native value.
 export const client = createClient({ chain, account });
 
 export function requireAccount() {
