@@ -29,7 +29,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-app.get("/health", (_req, res) => res.json({ ok: true, service: "obolus-backend" }));
+app.get("/health", (_req, res) => res.json({ ok: true, service: "obolus-api" }));
 
 app.use("/vaults", vaultsRouter);
 app.post("/vaults/:vaultId/claims", requireServiceKey, submitClaim);

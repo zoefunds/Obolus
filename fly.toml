@@ -1,6 +1,6 @@
 # Fly.io app config for the Obolus backend. Deploy from the repo root:
 #   flyctl deploy --config fly.toml --dockerfile backend/Dockerfile
-app = "obolus-backend"
+app = "obolus-api"
 primary_region = "iad"
 
 [build]

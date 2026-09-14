@@ -1,7 +1,7 @@
 import { Link } from "react-router-dom";
 import { Icon } from "./ui.jsx";
 import StatusBadge from "./StatusBadge.jsx";
-import { formatGen } from "../lib/gen.js";
+import { formatUsdc } from "../lib/usdc.js";
 
 const STATUS_ICON = {
   ACTIVE: "lock",
@@ -30,7 +30,7 @@ export default function VaultCard({ vault, roleLabel }) {
       {roleLabel && <p className="text-label-sm font-mono text-outline mb-4">{roleLabel}</p>}
       <div className="flex justify-between text-label-sm font-mono border-t border-outline-variant/20 pt-3">
         <span className="text-outline">Escrowed</span>
-        <span className="text-on-surface">{formatGen(vault.balance_wei)}</span>
+        <span className="text-on-surface">{formatUsdc(vault.balance_usdc)}</span>
       </div>
     </Link>
   );

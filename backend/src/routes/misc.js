@@ -1,8 +1,9 @@
 import { Router } from "express";
 import { readMethod, writeMethod } from "../contract.js";
-import { cached, invalidate } from "../cache.js";
+import { cached } from "../cache.js";
 import { CONTRACT_ADDRESS } from "../genlayerClient.js";
 import { requireServiceKey } from "../auth.js";
+import { getTotalClaimable, getEscrowClaimable, config as baseConfig, isEscrowConfigured } from "../baseSepolia.js";
 
 export const miscRouter = Router();
 
@@ -14,26 +15,44 @@ miscRouter.get("/platform/network", (_req, res) => {
   res.json({
     contractAddress: CONTRACT_ADDRESS || null,
     network: process.env.GENLAYER_NETWORK || "studionet",
+    baseSepolia: {
+      chainId: 84532,
+      usdcAddress: baseConfig.usdcAddress,
+      escrowAddress: baseConfig.escrowAddress || null,
+      configured: isEscrowConfigured(),
+    },
   });
 });
 
-// GET /balances/:address
+// GET /balances/:address — real, claimable USDC on Base Sepolia's
+// ObolusEscrow (across every vault), not an internal GenLayer ledger — see
+// MEMORY.md, "USDC migration". Call this instead of the old
+// get_balance_of; the money itself moves via the user's own claim()/
+// claimMany() call on ObolusEscrow, never through this backend.
 miscRouter.get("/balances/:address", async (req, res, next) => {
   try {
-    const balance = await cached(`balance:${req.params.address}`, 5, () => readMethod("get_balance_of", [req.params.address]));
-    res.json({ address: req.params.address, balanceWei: String(balance) });
+    if (!isEscrowConfigured()) {
+      return res.status(503).json({ error: "Escrow contract not configured yet" });
+    }
+    const totalClaimableUsdc = await cached(`balance:${req.params.address}`, 5, () =>
+      getTotalClaimable(req.params.address)
+    );
+    res.json({ address: req.params.address, totalClaimableUsdc: String(totalClaimableUsdc) });
   } catch (err) {
     next(err);
   }
 });
 
-// POST /balances/withdraw  body: { amountWei }
-miscRouter.post("/balances/withdraw", requireServiceKey, async (req, res, next) => {
+// GET /balances/:address/vault/:vaultId — claimable USDC for one vault
+// specifically (useful right after a resolve/cancel before the aggregate
+// cache above refreshes).
+miscRouter.get("/balances/:address/vault/:vaultId", async (req, res, next) => {
   try {
-    const { amountWei } = req.body;
-    if (!amountWei) return res.status(400).json({ error: "amountWei is required" });
-    const result = await writeMethod("withdraw", [amountWei]);
-    res.json(result);
+    if (!isEscrowConfigured()) {
+      return res.status(503).json({ error: "Escrow contract not configured yet" });
+    }
+    const claimableUsdc = await getEscrowClaimable(Number(req.params.vaultId), req.params.address);
+    res.json({ address: req.params.address, vaultId: Number(req.params.vaultId), claimableUsdc: String(claimableUsdc) });
   } catch (err) {
     next(err);
   }
@@ -62,7 +81,6 @@ miscRouter.get("/platform/config", async (_req, res, next) => {
 miscRouter.post("/admin/pause", requireServiceKey, async (_req, res, next) => {
   try {
     res.json(await writeMethod("pause", []));
-    await invalidate("platform_stats");
   } catch (err) {
     next(err);
   }
@@ -71,18 +89,16 @@ miscRouter.post("/admin/pause", requireServiceKey, async (_req, res, next) => {
 miscRouter.post("/admin/unpause", requireServiceKey, async (_req, res, next) => {
   try {
     res.json(await writeMethod("unpause", []));
-    await invalidate("platform_stats");
   } catch (err) {
     next(err);
   }
 });
 
-// body: { minClaimantBondWei, minContesterBondWei }
+// body: { minClaimantBondUsdc, minContesterBondUsdc }
 miscRouter.post("/admin/minimum-bonds", requireServiceKey, async (req, res, next) => {
   try {
-    const { minClaimantBondWei = 0, minContesterBondWei = 0 } = req.body;
-    res.json(await writeMethod("set_minimum_bonds", [Number(minClaimantBondWei), Number(minContesterBondWei)]));
-    await invalidate("platform_config");
+    const { minClaimantBondUsdc = 0, minContesterBondUsdc = 0 } = req.body;
+    res.json(await writeMethod("set_minimum_bonds", [Number(minClaimantBondUsdc), Number(minContesterBondUsdc)]));
   } catch (err) {
     next(err);
   }

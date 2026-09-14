@@ -4,7 +4,7 @@
 module.exports = {
   apps: [
     {
-      name: "obolus-backend",
+      name: "obolus-api",
       cwd: "./backend",
       script: "src/server.js",
       interpreter: "node",

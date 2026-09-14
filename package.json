@@ -11,8 +11,8 @@
     "deploy": "node scripts/deploy.mjs",
     "backend": "npm run dev --workspace backend",
     "backend:prod": "pm2 start ecosystem.config.cjs",
-    "backend:prod:stop": "pm2 stop obolus-backend",
-    "backend:prod:logs": "pm2 logs obolus-backend",
+    "backend:prod:stop": "pm2 stop obolus-api",
+    "backend:prod:logs": "pm2 logs obolus-api",
     "frontend": "npm run dev --workspace frontend",
     "test:contract": "pytest tests/direct/ -v",
     "lint:contract": "genvm-lint check contracts/obolus.py --json"

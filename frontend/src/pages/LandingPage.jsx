@@ -30,7 +30,7 @@ const STEPS = [
     n: "01",
     tag: "SETUP",
     title: "Fund a vault",
-    body: "Lock GEN, name a beneficiary and the subject whose death must be evidenced. The vault sits ACTIVE — dormant, fully reclaimable — until a claim is opened.",
+    body: "Lock USDC, name a beneficiary and the subject whose death must be evidenced. The vault sits ACTIVE — dormant, fully reclaimable — until a claim is opened.",
   },
   {
     n: "02",
@@ -90,7 +90,7 @@ export default function LandingPage() {
             Inheritance that waits for truth, <span className="text-primary">not just a timer.</span>
           </h1>
           <p className="text-body-md text-on-surface-variant max-w-xl mx-auto leading-relaxed">
-            Obolus is an escrow that only releases inherited GEN when GenLayer's validator network independently
+            Obolus is an escrow that only releases inherited USDC when GenLayer's validator network independently
             reads real, fetched evidence and agrees a specific named person has died — never on silence, never on
             one party's word.
           </p>

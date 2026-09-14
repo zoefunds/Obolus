@@ -61,5 +61,10 @@ export async function walletWriteContract(walletClient, { address, functionName,
   const txHash = await walletClient.writeContract({ address, functionName, args, value, account: walletClient.account });
   // ACCEPTED, not FINALIZED — see backend/src/contract.js's writeMethod for
   // why. interval/retries mirror ~/Event-Weaver's confirmed-working values.
-  return walletClient.waitForTransactionReceipt({ hash: txHash, status: "ACCEPTED", interval: 4000, retries: 90 });
+  // fullTransaction: true is required to get the leader receipt's raw
+  // return-value bytes back (genlayer-js strips them from the default
+  // "simplified" receipt, leaving only a human-readable string) — see
+  // lib/writes.js's extractReturnValue, which needs those raw bytes to
+  // decode a written call's actual return value (e.g. the new vault id).
+  return walletClient.waitForTransactionReceipt({ hash: txHash, status: "ACCEPTED", interval: 4000, retries: 90, fullTransaction: true });
 }

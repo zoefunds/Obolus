@@ -73,25 +73,27 @@ function WalletControl() {
 export default function Header() {
   const { address } = useAddress();
   const { isOwner } = useIsOwner();
-  const [balanceWei, setBalanceWei] = useState(null);
+  const [claimableUnits, setClaimableUnits] = useState(null);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     if (!address) {
-      setBalanceWei(null);
+      setClaimableUnits(null);
       return;
     }
     api
       .getBalance(address)
-      .then((res) => !cancelled && setBalanceWei(res.balanceWei))
-      .catch(() => !cancelled && setBalanceWei(null));
+      .then((res) => !cancelled && setClaimableUnits(res.totalClaimableUsdc))
+      .catch(() => !cancelled && setClaimableUnits(null));
     return () => {
       cancelled = true;
     };
   }, [address]);
 
-  const balanceGen = balanceWei ? (Number(BigInt(balanceWei)) / 1e18).toLocaleString(undefined, { maximumFractionDigits: 4 }) : null;
+  const balanceUsdc = claimableUnits
+    ? (Number(BigInt(claimableUnits)) / 1e6).toLocaleString(undefined, { maximumFractionDigits: 4 })
+    : null;
   const mobileLinks = isOwner ? [...NAV_LINKS, { to: "/admin", label: "Admin" }] : NAV_LINKS;
 
   return (
@@ -120,7 +122,7 @@ export default function Header() {
               to="/balance"
               className="hidden sm:flex px-4 py-1.5 rounded-full border border-primary/30 bg-primary/5 text-primary font-mono text-label-sm hover:bg-primary/10 transition-colors"
             >
-              Balance: {balanceGen ?? "…"} GEN
+              Balance: {balanceUsdc ?? "…"} USDC
             </NavLink>
           )}
           <WalletControl />
@@ -142,7 +144,7 @@ export default function Header() {
           ))}
           {address && (
             <NavLink to="/balance" className={mobileNavClass} onClick={() => setMobileMenuOpen(false)}>
-              Balance ({balanceGen ?? "…"} GEN)
+              Balance ({balanceUsdc ?? "…"} USDC)
             </NavLink>
           )}
         </nav>

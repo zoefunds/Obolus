@@ -2,9 +2,10 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { GlassPanel, Icon, Field, Input, Button, ErrorBanner } from "../components/ui.jsx";
 import { useAddress } from "../lib/AddressContext.jsx";
-import { genToWei, formatGen } from "../lib/gen.js";
+import { usdcToUnits, formatUsdc } from "../lib/usdc.js";
 import { api } from "../api.js";
 import { write } from "../lib/writes.js";
+import { sendBaseSepoliaSteps } from "../lib/baseSepoliaWallet.js";
 
 const MAX_AKA_COUNT = 6; // contracts/verifiable_decease_escrow.py: MAX_AKA_COUNT
 
@@ -19,8 +20,9 @@ export default function CreateVaultPage() {
   const [akaDraft, setAkaDraft] = useState("");
   const [birthYear, setBirthYear] = useState("");
   const [windowDays, setWindowDays] = useState(30);
-  const [amountGen, setAmountGen] = useState("");
+  const [amountUsdc, setAmountUsdc] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [step, setStep] = useState("");
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -46,18 +48,29 @@ export default function CreateVaultPage() {
     }
     setSubmitting(true);
     try {
-      const receipt = await write(
-        glClient,
-        "create_vault",
-        [beneficiary, subjectName, JSON.stringify(akas), birthYear ? Number(birthYear) : 0, Math.round(Number(windowDays) * 86400)],
-        genToWei(amountGen)
-      );
-      const vaultId = receipt?.data?.result;
-      navigate(vaultId ? `/vaults/${vaultId}` : "/dashboard");
+      const amountUnits = usdcToUnits(amountUsdc);
+      setStep("Declaring vault on GenLayer…");
+      const receipt = await write(glClient, "create_vault", [
+        beneficiary,
+        subjectName,
+        JSON.stringify(akas),
+        birthYear ? Number(birthYear) : 0,
+        Math.round(Number(windowDays) * 86400),
+        Number(amountUnits),
+      ]);
+      const vaultId = receipt?.resultValue;
+      if (!vaultId) throw new Error("Vault created but no vault id was returned — check /dashboard.");
+
+      setStep("Depositing USDC on Base Sepolia (approve, then deposit)…");
+      const { steps } = await api.getEscrowFundCalldata(vaultId, amountUnits.toString());
+      await sendBaseSepoliaSteps(address, steps);
+
+      navigate(`/vaults/${vaultId}`);
     } catch (err) {
       setError(err.message);
     } finally {
       setSubmitting(false);
+      setStep("");
     }
   }
 
@@ -67,8 +80,10 @@ export default function CreateVaultPage() {
         <div className="p-8 border-b border-outline-variant/30 bg-surface-container-low/50">
           <h1 className="text-headline-lg font-bold text-primary mb-2">Create a Vault</h1>
           <p className="text-body-md text-on-surface-variant">
-            Lock GEN for a beneficiary, naming the subject whose death must be evidenced to release it. The vault
-            stays fully reclaimable while ACTIVE — nothing is final until a claim resolves.
+            Lock USDC for a beneficiary, naming the subject whose death must be evidenced to release it. The vault
+            stays fully reclaimable while ACTIVE — nothing is final until a claim resolves. Depositing requires two
+            wallet confirmations on Base Sepolia (approve, then deposit) right after the vault is declared on
+            GenLayer.
           </p>
         </div>
         <form className="p-8 space-y-8" onSubmit={handleSubmit}>
@@ -137,10 +152,10 @@ export default function CreateVaultPage() {
               </div>
             </Field>
 
-            <Field label="GEN to Escrow">
+            <Field label="USDC to Escrow" hint="Base Sepolia USDC — you'll approve and deposit this after the vault is created.">
               <div className="relative">
-                <Input type="number" step="any" min="0" value={amountGen} onChange={(e) => setAmountGen(e.target.value)} placeholder="0.00" required />
-                <span className="absolute right-4 top-1/2 -translate-y-1/2 text-label-sm font-mono text-primary font-bold pointer-events-none">GEN</span>
+                <Input type="number" step="any" min="0" value={amountUsdc} onChange={(e) => setAmountUsdc(e.target.value)} placeholder="0.00" required />
+                <span className="absolute right-4 top-1/2 -translate-y-1/2 text-label-sm font-mono text-primary font-bold pointer-events-none">USDC</span>
               </div>
             </Field>
           </div>
@@ -160,11 +175,11 @@ export default function CreateVaultPage() {
                 <div className="flex gap-4 flex-wrap">
                   <div className="px-3 py-2 rounded-lg bg-surface-container-lowest border border-outline-variant/10">
                     <span className="block text-[10px] font-mono text-outline uppercase mb-0.5">Min. claimant bond</span>
-                    <span className="text-on-surface font-mono text-code-md">{formatGen(config.min_claimant_bond_wei)}</span>
+                    <span className="text-on-surface font-mono text-code-md">{formatUsdc(config.min_claimant_bond_usdc)}</span>
                   </div>
                   <div className="px-3 py-2 rounded-lg bg-surface-container-lowest border border-outline-variant/10">
                     <span className="block text-[10px] font-mono text-outline uppercase mb-0.5">Min. contester bond</span>
-                    <span className="text-on-surface font-mono text-code-md">{formatGen(config.min_contester_bond_wei)}</span>
+                    <span className="text-on-surface font-mono text-code-md">{formatUsdc(config.min_contester_bond_usdc)}</span>
                   </div>
                 </div>
               )}
@@ -172,6 +187,7 @@ export default function CreateVaultPage() {
           </div>
 
           <div className="flex items-center justify-end gap-4 pt-4">
+            {submitting && step && <span className="text-label-sm font-mono text-on-surface-variant">{step}</span>}
             <Button type="submit" loading={submitting}>
               {submitting ? "Establishing…" : "Establish Vault"}
             </Button>

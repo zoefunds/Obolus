@@ -1,6 +1,6 @@
 {
   "rewrites": [
-    { "source": "/api/:path*", "destination": "https://obolus-backend.fly.dev/:path*" },
+    { "source": "/api/:path*", "destination": "https://obolus-api.fly.dev/:path*" },
     { "source": "/(.*)", "destination": "/index.html" }
   ]
 }

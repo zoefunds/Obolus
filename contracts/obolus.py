@@ -82,6 +82,7 @@ MAX_CONTEST_URLS = 5
 MAX_EVIDENCE_EXCERPT = 1400   # chars of rendered page fed to the LLM per source
 MAX_REASONING_STORED = 1200
 MAX_VAULTS_PER_ADDRESS = 200   # scan cap, not a hard business limit
+MAX_SETTLEMENTS_PER_VAULT = 64  # scan cap for the relayer sweep, not a business limit
 
 MIN_CONTEST_WINDOW_SECONDS = 3600            # 1 hour floor — always some window
 MAX_CONTEST_WINDOW_SECONDS = 180 * 24 * 3600  # 180 days ceiling — sanity rail
@@ -100,9 +101,6 @@ MAX_CONTESTS_PER_CLAIM = 20
 # be edited or removed, so evidence already on record can never be pushed
 # out by a later submission either.
 MAX_CONTEST_URLS_PER_RESOLUTION = MAX_CONTEST_URLS
-
-# GEN is 18-decimal; amounts are always u256 wei, never floats.
-WEI = 1
 
 # One resolution attempt fetches at most this many text sources total
 # (death evidence + contest evidence combined) to keep the nondet round
@@ -333,35 +331,6 @@ def _parse_verdict_payload(raw: typing.Any) -> dict:
 
 
 # ============================================================================
-#  Native-value transfer path — EOAs live on the chain layer, not the IC
-#  layer, so paying a wallet needs the EVM-interface stub, not
-#  gl.get_contract_at(...).emit_transfer(...) (that path is IC-to-IC only
-#  and fails against a plain wallet address). Every payout in this contract
-#  funnels through this single choke point.
-# ============================================================================
-
-@gl.evm.contract_interface
-class _Recipient:
-    class View:
-        pass
-
-    class Write:
-        pass
-
-
-def _send_gen(to_address: Address, amount: int) -> None:
-    """Single emission point for every native-token payout. Callers MUST
-    zero the ledger field and persist state BEFORE calling this — never
-    after — so a reentrant call always finds the balance already zeroed.
-    Value moves on finalization; see withdraw() for why payouts are pull-
-    based (credit an internal balance, then withdraw()) rather than
-    pushed automatically the moment a verdict lands."""
-    if amount <= 0:
-        return
-    _Recipient(to_address).emit_transfer(value=u256(int(amount)))
-
-
-# ============================================================================
 #  Storage dataclasses
 # ============================================================================
 
@@ -370,14 +339,22 @@ def _send_gen(to_address: Address, amount: int) -> None:
 class Vault:
     """One inheritance escrow: a grantor's funds, a named subject whose
     death must be evidenced, and a beneficiary who receives the funds on a
-    confirmed verdict."""
+    confirmed verdict.
+
+    `balance_usdc` is a *declared* ledger figure, in USDC base units (6
+    decimals) — this contract never custodies real value itself. The real
+    USDC lives in ObolusEscrow on Base Sepolia (contracts/base/ObolusEscrow.sol);
+    every deposit here must be matched by an actual on-chain deposit there,
+    and every payout recorded here (see Settlement below) is relayed to that
+    contract before a recipient can actually claim it. See docs/CONTRACT.md
+    and README.md §7 for the split-chain design."""
     id: u32
     grantor: Address
     beneficiary: Address
     subject_name: str
     subject_aka_json: str        # JSON array of alternate names/aliases
     subject_birth_year: u32      # 0 = unspecified
-    balance_wei: u256            # escrowed ledger — the only field payouts read
+    balance_usdc: u256           # declared escrowed ledger — the only field payouts read
     status: u8
     contest_window_seconds: u32
     confidence_floor_note: str   # human-readable note, floor itself is fixed at HIGH
@@ -398,7 +375,7 @@ class Claim:
     evidence_urls_json: str        # JSON array of death-evidence URLs
     evidence_image_url: str        # optional single screenshot/photo URL, "" if none
     claimant_note: str
-    claimant_bond_wei: u256
+    claimant_bond_usdc: u256
     contest_count: u32             # number of Contest rows filed against this claim
     submitted_ts: u64
     contest_deadline_ts: u64
@@ -426,8 +403,43 @@ class Contest:
     contester: Address
     urls_json: str        # JSON array of this contest's counter-evidence URLs
     image_url: str         # optional single counter-evidence screenshot URL, "" if none
-    bond_wei: u256
+    bond_usdc: u256
     submitted_ts: u64
+
+
+@allow_storage
+@dataclass
+class Settlement:
+    """One pending (or already-relayed) USDC payment instruction produced
+    by a resolve_claim verdict or a cancel_vault refund. This contract
+    never moves real value — it only records who is owed how much from a
+    given vault's ObolusEscrow pool on Base Sepolia. The backend relayer
+    polls get_pending_settlements(vault_id), pushes the (recipient, amount)
+    list to ObolusEscrow.settle(), then calls mark_settlements_relayed so
+    the same instruction is never relayed twice. The recipient still has
+    to call claim() on the Base contract themselves — this only unlocks
+    that ability; it never transfers anything itself."""
+    id: u32
+    vault_id: u32
+    recipient: Address
+    amount_usdc: u256
+    relayed: bool
+    created_ts: u64
+
+
+# ============================================================================
+#  Native-value transfer path — none. This contract is deliberately
+#  value-free: every deposit (vault funding, claimant bonds, contester
+#  bonds) and every payout (beneficiary release, bond returns/forfeitures,
+#  grantor refunds) is a *declared* USDC amount recorded here for GenLayer's
+#  validator consensus to reason about, while the real USDC custody and
+#  transfer happens on Base Sepolia's ObolusEscrow contract. See the
+#  Settlement dataclass above and _record_settlement below for the payout
+#  half of that split; the funding half is the amount_usdc/bond_usdc
+#  parameters on create_vault/fund_vault/submit_death_claim/contest_claim,
+#  which the caller must back with a real matching deposit on
+#  ObolusEscrow.fundVault before (or alongside) calling here.
+# ============================================================================
 
 
 # ============================================================================
@@ -450,13 +462,18 @@ class VerifiableDeceaseEscrow(gl.Contract):
       - Abstention: a resolution attempt that is not confidently DECEASED
         or confidently ALIVE/REFUTED lands on INCONCLUSIVE and changes no
         balances — never guesses.
+      - Value-free: this contract only judges and records declared USDC
+        amounts (base units, 6 decimals). Real custody and transfer of
+        USDC happens on Base Sepolia's ObolusEscrow contract, driven by a
+        backend relayer reading this contract's Settlement records — see
+        the Settlement dataclass above.
     """
 
     # ---- platform config ----------------------------------------------------
     owner: Address
     paused: bool
-    min_claimant_bond_wei: u256
-    min_contester_bond_wei: u256
+    min_claimant_bond_usdc: u256
+    min_contester_bond_usdc: u256
 
     # ---- vault storage --------------------------------------------------------
     vault_count: u64
@@ -474,14 +491,16 @@ class VerifiableDeceaseEscrow(gl.Contract):
     contests: TreeMap[u32, Contest]
     claim_contest_ids: TreeMap[u32, DynArray[u32]]
 
-    # ---- internal withdrawable balances — credited by refunds, payouts,
-    # bond returns and forfeitures; withdraw() is the only path that turns
-    # a credit into a real native transfer. ----------------------------------
-    balances: TreeMap[Address, u256]
+    # ---- settlement storage — every payout instruction ever produced,
+    # pending or already relayed to Base Sepolia's ObolusEscrow. See the
+    # Settlement dataclass above. ---------------------------------------------
+    settlement_count: u64
+    settlements: TreeMap[u32, Settlement]
+    vault_settlement_ids: TreeMap[u32, DynArray[u32]]
 
     # ---- platform metrics ---------------------------------------------------
-    total_escrowed_wei: u256          # sum of all ACTIVE/CLAIM_PENDING vault balances
-    total_paid_out_wei: u256
+    total_escrowed_usdc: u256          # sum of all ACTIVE/CLAIM_PENDING vault balances
+    total_paid_out_usdc: u256          # sum of every settlement ever recorded
     total_claims_confirmed: u64
     total_claims_refuted: u64
     total_claims_inconclusive: u64
@@ -490,24 +509,27 @@ class VerifiableDeceaseEscrow(gl.Contract):
     #  Construction
     # ------------------------------------------------------------------------
 
-    def __init__(self, min_claimant_bond_wei: int = 0, min_contester_bond_wei: int = 0):
+    def __init__(self, min_claimant_bond_usdc: int = 0, min_contester_bond_usdc: int = 0):
         """Deploy the platform.
 
         Args:
-            min_claimant_bond_wei: minimum GEN (wei) a claimant must post
-                when opening a death claim. 0 disables the requirement.
-            min_contester_bond_wei: minimum GEN (wei) a contester must post
-                when submitting contest evidence. 0 disables it.
+            min_claimant_bond_usdc: minimum USDC (base units) a claimant
+                must declare when opening a death claim. 0 disables the
+                requirement.
+            min_contester_bond_usdc: minimum USDC (base units) a contester
+                must declare when submitting contest evidence. 0 disables
+                it.
         """
         self.owner = gl.message.sender_address
         self.paused = False
-        self.min_claimant_bond_wei = u256(max(0, int(min_claimant_bond_wei)))
-        self.min_contester_bond_wei = u256(max(0, int(min_contester_bond_wei)))
+        self.min_claimant_bond_usdc = u256(max(0, int(min_claimant_bond_usdc)))
+        self.min_contester_bond_usdc = u256(max(0, int(min_contester_bond_usdc)))
         self.vault_count = u64(0)
         self.claim_count = u64(0)
         self.contest_count = u64(0)
-        self.total_escrowed_wei = u256(0)
-        self.total_paid_out_wei = u256(0)
+        self.settlement_count = u64(0)
+        self.total_escrowed_usdc = u256(0)
+        self.total_paid_out_usdc = u256(0)
         self.total_claims_confirmed = u64(0)
         self.total_claims_refuted = u64(0)
         self.total_claims_inconclusive = u64(0)
@@ -538,16 +560,32 @@ class VerifiableDeceaseEscrow(gl.Contract):
             raise gl.vm.UserError(ERR_EXPECTED + f"claim {claim_id} does not exist")
         return claim
 
-    def _credit_balance(self, addr: Address, amount: int) -> None:
-        """Credit an internal withdrawable balance. Value stays inside the
-        contract's own on-chain balance until withdraw() emits the real
-        transfer — this is what keeps every payout recoverable even if a
-        downstream transfer would otherwise fail (see withdraw())."""
+    def _record_settlement(self, vault_id: int, addr: Address, amount: int) -> None:
+        """Record a pending USDC payout instruction for the backend relayer
+        to push to ObolusEscrow on Base Sepolia. This never moves real
+        value itself — it only appends a Settlement row and bumps the
+        platform's total_paid_out_usdc counter. See the Settlement
+        dataclass docstring for the full relay flow."""
         if amount <= 0:
             return
-        current = self.balances.get(addr)
-        base = int(current) if current is not None else 0
-        self.balances[addr] = u256(base + int(amount))
+        settlement_id = int(self.settlement_count) + 1
+        self.settlement_count = u64(settlement_id)
+        sid = u32(settlement_id)
+        self.settlements[sid] = Settlement(
+            id=sid,
+            vault_id=u32(vault_id),
+            recipient=addr,
+            amount_usdc=u256(int(amount)),
+            relayed=False,
+            created_ts=u64(_chain_now_ts()),
+        )
+        vid = u32(vault_id)
+        if self.vault_settlement_ids.get(vid) is None:
+            self.vault_settlement_ids[vid] = []
+        arr = self.vault_settlement_ids[vid]
+        if len(arr) < MAX_SETTLEMENTS_PER_VAULT:
+            arr.append(sid)
+        self.total_paid_out_usdc = u256(int(self.total_paid_out_usdc) + int(amount))
 
     def _record_grantor_vault(self, addr: Address, vault_id: int) -> None:
         if self.grantor_vaults.get(addr) is None:
@@ -586,6 +624,17 @@ class VerifiableDeceaseEscrow(gl.Contract):
                 result.append(contest)
         return result
 
+    def _get_settlements_for_vault(self, vault_id: int) -> list[Settlement]:
+        ids = self.vault_settlement_ids.get(u32(vault_id))
+        if ids is None:
+            return []
+        result = []
+        for sid in ids:
+            settlement = self.settlements.get(sid)
+            if settlement is not None:
+                result.append(settlement)
+        return result
+
     # ------------------------------------------------------------------------
     #  Serialization for views (schema-safe primitives only — no dataclass
     #  objects or Address instances ever cross the view boundary raw).
@@ -599,7 +648,7 @@ class VerifiableDeceaseEscrow(gl.Contract):
             "subject_name": vault.subject_name,
             "subject_aka": json.loads(vault.subject_aka_json) if vault.subject_aka_json else [],
             "subject_birth_year": int(vault.subject_birth_year),
-            "balance_wei": int(vault.balance_wei),
+            "balance_usdc": int(vault.balance_usdc),
             "status": VAULT_STATUS_NAMES.get(int(vault.status), "ACTIVE"),
             "contest_window_seconds": int(vault.contest_window_seconds),
             "created_ts": int(vault.created_ts),
@@ -610,7 +659,7 @@ class VerifiableDeceaseEscrow(gl.Contract):
 
     def _claim_dict(self, claim: Claim) -> dict:
         contests = self._get_contests_for_claim(int(claim.id))
-        total_contester_bond = sum(int(c.bond_wei) for c in contests)
+        total_contester_bond = sum(int(c.bond_usdc) for c in contests)
         return {
             "id": int(claim.id),
             "vault_id": int(claim.vault_id),
@@ -619,9 +668,9 @@ class VerifiableDeceaseEscrow(gl.Contract):
             "evidence_urls": json.loads(claim.evidence_urls_json) if claim.evidence_urls_json else [],
             "evidence_image_url": claim.evidence_image_url,
             "claimant_note": claim.claimant_note,
-            "claimant_bond_wei": int(claim.claimant_bond_wei),
+            "claimant_bond_usdc": int(claim.claimant_bond_usdc),
             "contest_count": int(claim.contest_count),
-            "total_contester_bond_wei": total_contester_bond,
+            "total_contester_bond_usdc": total_contester_bond,
             "submitted_ts": int(claim.submitted_ts),
             "contest_deadline_ts": int(claim.contest_deadline_ts),
             "resolved_ts": int(claim.resolved_ts),
@@ -639,15 +688,25 @@ class VerifiableDeceaseEscrow(gl.Contract):
             "contester": contest.contester.as_hex,
             "urls": json.loads(contest.urls_json) if contest.urls_json else [],
             "image_url": contest.image_url,
-            "bond_wei": int(contest.bond_wei),
+            "bond_usdc": int(contest.bond_usdc),
             "submitted_ts": int(contest.submitted_ts),
+        }
+
+    def _settlement_dict(self, settlement: Settlement) -> dict:
+        return {
+            "id": int(settlement.id),
+            "vault_id": int(settlement.vault_id),
+            "recipient": settlement.recipient.as_hex,
+            "amount_usdc": int(settlement.amount_usdc),
+            "relayed": bool(settlement.relayed),
+            "created_ts": int(settlement.created_ts),
         }
 
     # ========================================================================
     #  PUBLIC WRITES — vault lifecycle (deterministic)
     # ========================================================================
 
-    @gl.public.write.payable
+    @gl.public.write
     def create_vault(
         self,
         beneficiary: str,
@@ -655,9 +714,15 @@ class VerifiableDeceaseEscrow(gl.Contract):
         subject_aka_json: str,
         subject_birth_year: int,
         contest_window_seconds: int,
+        amount_usdc: int,
     ) -> int:
-        """Create and fund a decease-escrow vault. Attach the GEN to be
-        inherited as the call's value.
+        """Create a decease-escrow vault, declaring the USDC (base units,
+        6 decimals) to be inherited. This call is value-free — it only
+        records the declaration; the caller must separately deposit the
+        matching real USDC into ObolusEscrow.fundVault(vaultId, amount) on
+        Base Sepolia (see README.md §7). The backend's
+        GET /vaults/:id/escrow-fund-calldata (or an equivalent direct call)
+        returns the approve + fundVault calldata for the connected wallet.
 
         Args:
             beneficiary: hex address to receive funds on a confirmed verdict.
@@ -669,15 +734,17 @@ class VerifiableDeceaseEscrow(gl.Contract):
             contest_window_seconds: how long a submitted claim stays
                 contestable before resolution may run. Bounded to
                 [MIN_CONTEST_WINDOW_SECONDS, MAX_CONTEST_WINDOW_SECONDS].
+            amount_usdc: declared USDC (base units) being escrowed — must
+                match a real deposit on ObolusEscrow for this vault id.
 
         Returns: the new vault id.
         """
         self._not_paused()
         sender = gl.message.sender_address
-        deposit = int(gl.message.value)
+        deposit = int(amount_usdc)
         now_ts = _chain_now_ts()
 
-        _require(deposit > 0, "vault must be funded with GEN value")
+        _require(deposit > 0, "vault must be funded with a positive USDC amount")
         beneficiary_addr = _coerce_address(beneficiary)
         _require(not _is_zero_address(beneficiary_addr), "beneficiary must not be the zero address")
         _require(beneficiary_addr != sender, "beneficiary must differ from the grantor")
@@ -711,7 +778,7 @@ class VerifiableDeceaseEscrow(gl.Contract):
             subject_name=subject_name.strip(),
             subject_aka_json=json.dumps(clean_akas),
             subject_birth_year=u32(max(0, int(subject_birth_year))),
-            balance_wei=u256(deposit),
+            balance_usdc=u256(deposit),
             status=u8(VAULT_ACTIVE),
             contest_window_seconds=u32(window),
             confidence_floor_note="verdict must be HIGH confidence to flip a terminal state",
@@ -720,22 +787,24 @@ class VerifiableDeceaseEscrow(gl.Contract):
             claim_count=u32(0),
             active_claim_id=u32(0),
         )
-        self.total_escrowed_wei = u256(int(self.total_escrowed_wei) + deposit)
+        self.total_escrowed_usdc = u256(int(self.total_escrowed_usdc) + deposit)
         self._record_grantor_vault(sender, vault_id)
         self._record_beneficiary_vault(beneficiary_addr, vault_id)
         return vault_id
 
-    @gl.public.write.payable
-    def fund_vault(self, vault_id: int) -> None:
-        """Add more GEN to an existing ACTIVE vault. Anyone may top up a
-        vault (e.g. co-grantors), not only the original grantor."""
+    @gl.public.write
+    def fund_vault(self, vault_id: int, amount_usdc: int) -> None:
+        """Declare more USDC added to an existing ACTIVE vault. Anyone may
+        top up a vault (e.g. co-grantors), not only the original grantor —
+        but the caller must separately deposit the matching real USDC into
+        ObolusEscrow.fundVault(vaultId, amount) on Base Sepolia."""
         self._not_paused()
         vault = self._get_vault(vault_id)
         _require(int(vault.status) == VAULT_ACTIVE, "vault is not open for funding")
-        amount = int(gl.message.value)
-        _require(amount > 0, "attach a positive value to fund the vault")
-        vault.balance_wei = u256(int(vault.balance_wei) + amount)
-        self.total_escrowed_wei = u256(int(self.total_escrowed_wei) + amount)
+        amount = int(amount_usdc)
+        _require(amount > 0, "fund amount must be a positive USDC amount")
+        vault.balance_usdc = u256(int(vault.balance_usdc) + amount)
+        self.total_escrowed_usdc = u256(int(self.total_escrowed_usdc) + amount)
 
     @gl.public.write
     def set_beneficiary(self, vault_id: int, new_beneficiary: str) -> None:
@@ -760,37 +829,43 @@ class VerifiableDeceaseEscrow(gl.Contract):
     def cancel_vault(self, vault_id: int) -> None:
         """Grantor only, ACTIVE vaults only: cancel and reclaim the full
         balance. This is the vault's fund-recovery exit — a grantor who
-        changes their mind, or funded the wrong vault, is never stuck,
-        as long as no claim is currently under judgement."""
+        changes their mind, or funded the wrong vault, is never stuck, as
+        long as no claim is currently under judgement. Records a
+        Settlement crediting the grantor the full balance; the backend
+        relayer pushes it to ObolusEscrow so the grantor can claim their
+        real USDC back on Base Sepolia."""
         vault = self._get_vault(vault_id)
         _require(gl.message.sender_address == vault.grantor, "only the grantor may cancel")
         _require(int(vault.status) == VAULT_ACTIVE, "only an active vault with no open claim can be cancelled")
-        refund = int(vault.balance_wei)
-        vault.balance_wei = u256(0)
+        refund = int(vault.balance_usdc)
+        vault.balance_usdc = u256(0)
         vault.status = u8(VAULT_CANCELLED)
         vault.resolved_ts = u64(_chain_now_ts())
-        self.total_escrowed_wei = u256(max(0, int(self.total_escrowed_wei) - refund))
-        if refund > 0:
-            self._credit_balance(vault.grantor, refund)
+        self.total_escrowed_usdc = u256(max(0, int(self.total_escrowed_usdc) - refund))
+        self._record_settlement(vault_id, vault.grantor, refund)
 
     # ========================================================================
     #  PUBLIC WRITES — claims and contests (deterministic bookkeeping only;
     #  no evidence is judged here, only recorded and bonded)
     # ========================================================================
 
-    @gl.public.write.payable
+    @gl.public.write
     def submit_death_claim(
         self,
         vault_id: int,
         evidence_urls_json: str,
         evidence_image_url: str,
         note: str,
+        bond_usdc: int,
     ) -> int:
         """Open a death claim against an ACTIVE vault. Anyone may submit —
         resolution is permissionless and evidence-driven, not identity-
-        gated. Attach at least min_claimant_bond_wei as a good-faith bond;
-        it is returned if the claim resolves CONFIRMED or INCONCLUSIVE, and
-        forfeited into the vault's own balance if the claim is REFUTED.
+        gated. Declare at least min_claimant_bond_usdc as a good-faith
+        bond and separately deposit the matching real USDC into
+        ObolusEscrow.fundVault(vaultId, bond) on Base Sepolia; it is
+        released back to the claimant if the claim resolves CONFIRMED or
+        INCONCLUSIVE, and forfeited into the vault's own balance if the
+        claim is REFUTED.
 
         Args:
             vault_id: target vault.
@@ -803,6 +878,7 @@ class VerifiableDeceaseEscrow(gl.Contract):
                 to a page/photo showing a certificate or obituary, rendered
                 as a screenshot during resolution. "" for none.
             note: free-text context, e.g. relationship to the subject.
+            bond_usdc: declared USDC (base units) bond backing this claim.
 
         Returns: the new claim id.
         """
@@ -811,8 +887,8 @@ class VerifiableDeceaseEscrow(gl.Contract):
         _require(int(vault.status) == VAULT_ACTIVE, "vault does not have an open funding state for a new claim")
         now_ts = _chain_now_ts()
 
-        bond = int(gl.message.value)
-        _require(bond >= int(self.min_claimant_bond_wei), "claimant bond below minimum")
+        bond = int(bond_usdc)
+        _require(bond >= int(self.min_claimant_bond_usdc), "claimant bond below minimum")
 
         urls = _parse_urls_json(evidence_urls_json, "evidence_urls_json", MAX_EVIDENCE_URLS)
         _require(len(urls) >= 1, "at least one evidence URL is required")
@@ -834,7 +910,7 @@ class VerifiableDeceaseEscrow(gl.Contract):
             evidence_urls_json=json.dumps(urls),
             evidence_image_url=image_url,
             claimant_note=note,
-            claimant_bond_wei=u256(bond),
+            claimant_bond_usdc=u256(bond),
             contest_count=u32(0),
             submitted_ts=u64(now_ts),
             contest_deadline_ts=u64(now_ts + int(vault.contest_window_seconds)),
@@ -851,12 +927,13 @@ class VerifiableDeceaseEscrow(gl.Contract):
         self._record_vault_claim(vault_id, claim_id)
         return claim_id
 
-    @gl.public.write.payable
+    @gl.public.write
     def contest_claim(
         self,
         claim_id: int,
         contest_urls_json: str,
         contest_image_url: str,
+        bond_usdc: int,
     ) -> None:
         """Submit counter-evidence against an OPEN claim before its contest
         deadline — e.g. a fresh, dated public appearance, or a "proof of
@@ -868,8 +945,10 @@ class VerifiableDeceaseEscrow(gl.Contract):
         a co-heir or acquaintance may have evidence the grantor cannot
         submit themself (including the case where the grantor's own keys
         are the ones actually lost, which is exactly the ambiguity this
-        contract exists to resolve rather than assume). Attach at least
-        min_contester_bond_wei; it is returned if the claim ultimately
+        contract exists to resolve rather than assume). Declare at least
+        min_contester_bond_usdc and separately deposit the matching real
+        USDC into ObolusEscrow.fundVault(vaultId, bond) on Base Sepolia;
+        it is released back to the contester if the claim ultimately
         resolves REFUTED or INCONCLUSIVE, and forfeited into the vault (via
         the beneficiary payout) if the claim resolves CONFIRMED despite
         the contest.
@@ -890,8 +969,8 @@ class VerifiableDeceaseEscrow(gl.Contract):
         _require(now_ts <= int(claim.contest_deadline_ts), "contest window has closed")
         _require(int(claim.contest_count) < MAX_CONTESTS_PER_CLAIM, "this claim has reached its contest limit")
 
-        bond = int(gl.message.value)
-        _require(bond >= int(self.min_contester_bond_wei), "contester bond below minimum")
+        bond = int(bond_usdc)
+        _require(bond >= int(self.min_contester_bond_usdc), "contester bond below minimum")
 
         urls = _parse_urls_json(contest_urls_json, "contest_urls_json", MAX_CONTEST_URLS)
         _require(len(urls) >= 1, "at least one contest URL is required")
@@ -910,7 +989,7 @@ class VerifiableDeceaseEscrow(gl.Contract):
             contester=sender,
             urls_json=json.dumps(urls),
             image_url=image_url,
-            bond_wei=u256(bond),
+            bond_usdc=u256(bond),
             submitted_ts=u64(now_ts),
         )
         self._record_claim_contest(claim_id, contest_id)
@@ -1192,19 +1271,21 @@ Respond with ONLY a JSON object, no markdown, with exactly these keys:
         the deterministic timing gate passes; the outcome is entirely
         evidence-driven, not caller-driven.
 
-        Terminal fund routing (every branch, so nothing is ever stranded):
-          - CONFIRMED (HIGH confidence, DECEASED): vault balance credited to
-            the beneficiary; claimant's bond returned to the claimant;
-            every contester's bond (if any) forfeited into the vault, then
-            also paid out as part of the same credit since the vault is
-            now fully resolved.
+        Terminal fund routing (every branch, so nothing is ever stranded).
+        Every credit below is recorded as a Settlement (see the Settlement
+        dataclass) for the backend relayer to push to ObolusEscrow on Base
+        Sepolia — this contract itself never moves real USDC:
+          - CONFIRMED (HIGH confidence, DECEASED): vault balance settled to
+            the beneficiary; claimant's bond settled back to the claimant;
+            every contester's bond (if any) forfeited into the same payout
+            since the vault is now fully resolved.
           - REFUTED (HIGH confidence, ALIVE_OR_REFUTED): claim closed,
             vault reopens to ACTIVE; claimant's bond forfeited into the
-            vault balance; every contester's bond (if any) returned to its
-            own submitter.
+            vault balance; every contester's bond (if any) settled back to
+            its own submitter.
           - INCONCLUSIVE (anything else — the abstention path): claim
             closed, vault reopens to ACTIVE; the claimant's bond AND every
-            contester's own bond are returned in full, since nobody was
+            contester's own bond are settled back in full, since nobody was
             shown wrong. A fresh claim with stronger evidence may be
             submitted later; nothing is lost.
 
@@ -1252,31 +1333,33 @@ Respond with ONLY a JSON object, no markdown, with exactly these keys:
 
         determination = verdict["determination"]
         confidence = verdict["confidence"]
-        claimant_bond = int(claim.claimant_bond_wei)
+        claimant_bond = int(claim.claimant_bond_usdc)
+        vault_id = int(vault.id)
 
         if determination == DETERMINATION_DECEASED and confidence == CONFIDENCE_HIGH:
-            # --- CONFIRMED: money moves. Zero the ledger and persist state
-            # BEFORE any credit is issued, so a re-entrant resolve_claim call
-            # on the same claim can never double-pay (claim.status is no
+            # --- CONFIRMED: money moves (via Settlement records — see
+            # docstring above). Zero the ledger and persist state BEFORE
+            # any settlement is recorded, so a re-entrant resolve_claim call
+            # on the same claim can never double-record (claim.status is no
             # longer OPEN/CONTESTED, so the guard above rejects it outright).
-            payout = int(vault.balance_wei)
-            vault.balance_wei = u256(0)
+            payout = int(vault.balance_usdc)
+            vault.balance_usdc = u256(0)
             vault.status = u8(VAULT_PAYOUT_READY)
             vault.resolved_ts = u64(max(0, int(now_ts)))
             vault.active_claim_id = u32(0)
             claim.status = u8(CLAIM_CONFIRMED)
-            self.total_escrowed_wei = u256(max(0, int(self.total_escrowed_wei) - payout))
+            self.total_escrowed_usdc = u256(max(0, int(self.total_escrowed_usdc) - payout))
             self.total_claims_confirmed = u64(int(self.total_claims_confirmed) + 1)
 
-            self._credit_balance(vault.beneficiary, payout)
-            self._credit_balance(claim.claimant, claimant_bond)
+            self._record_settlement(vault_id, vault.beneficiary, payout)
+            self._record_settlement(vault_id, claim.claimant, claimant_bond)
             # Every contester who submitted evidence but was overruled by a
             # HIGH-confidence DECEASED verdict forfeits their own bond into
             # the same payout the beneficiary receives — none of them vanish.
             for contest in contests:
-                bond = int(contest.bond_wei)
+                bond = int(contest.bond_usdc)
                 if bond > 0:
-                    self._credit_balance(vault.beneficiary, bond)
+                    self._record_settlement(vault_id, vault.beneficiary, bond)
 
         elif determination == DETERMINATION_ALIVE_OR_REFUTED and confidence == CONFIDENCE_HIGH:
             # --- REFUTED: no payout. Claimant's bond is slashed into the
@@ -1288,12 +1371,12 @@ Respond with ONLY a JSON object, no markdown, with exactly these keys:
             self.total_claims_refuted = u64(int(self.total_claims_refuted) + 1)
 
             if claimant_bond > 0:
-                vault.balance_wei = u256(int(vault.balance_wei) + claimant_bond)
-                self.total_escrowed_wei = u256(int(self.total_escrowed_wei) + claimant_bond)
+                vault.balance_usdc = u256(int(vault.balance_usdc) + claimant_bond)
+                self.total_escrowed_usdc = u256(int(self.total_escrowed_usdc) + claimant_bond)
             for contest in contests:
-                bond = int(contest.bond_wei)
+                bond = int(contest.bond_usdc)
                 if bond > 0:
-                    self._credit_balance(contest.contester, bond)
+                    self._record_settlement(vault_id, contest.contester, bond)
 
         else:
             # --- INCONCLUSIVE: the abstention path. Nobody was shown
@@ -1306,38 +1389,38 @@ Respond with ONLY a JSON object, no markdown, with exactly these keys:
             self.total_claims_inconclusive = u64(int(self.total_claims_inconclusive) + 1)
 
             if claimant_bond > 0:
-                self._credit_balance(claim.claimant, claimant_bond)
+                self._record_settlement(vault_id, claim.claimant, claimant_bond)
             for contest in contests:
-                bond = int(contest.bond_wei)
+                bond = int(contest.bond_usdc)
                 if bond > 0:
-                    self._credit_balance(contest.contester, bond)
+                    self._record_settlement(vault_id, contest.contester, bond)
 
         return self._claim_dict(claim)
 
     # ========================================================================
-    #  PUBLIC WRITES — value withdrawal (outbound half of the value path)
+    #  PUBLIC WRITE — settlement relay bookkeeping (no value moves here)
     # ========================================================================
 
     @gl.public.write
-    def withdraw(self, amount: int) -> None:
-        """Withdraw internal credited balance as a REAL native-token
-        transfer, emitted on finalization. This is the only function in the
-        whole contract that calls _send_gen — every other payout path only
-        credits the internal ledger, precisely so a downstream transfer
-        failure never stalls or corrupts vault/claim state; the credited
-        balance simply waits here until the recipient calls withdraw()."""
-        sender = gl.message.sender_address
+    def mark_settlements_relayed(self, settlement_ids_json: str) -> None:
+        """Backend relayer calls this after successfully pushing a batch of
+        Settlement rows to ObolusEscrow.settle() on Base Sepolia, so the
+        same instruction is never relayed twice. Permissionless bookkeeping
+        only — it flips a `relayed` flag here and never itself moves value,
+        so there is nothing to exploit by calling it early or falsely: the
+        real transfer is gated by ObolusEscrow's own onlyRelayer check and
+        its cumulative-allocation guard on Base Sepolia, not by this flag.
+        """
         try:
-            amount = int(amount)
-        except (ValueError, TypeError):
-            raise gl.vm.UserError(ERR_EXPECTED + "amount must be an integer")
-        current = self.balances.get(sender)
-        available = int(current) if current is not None else 0
-        _require(amount > 0, "withdraw amount must be positive")
-        _require(amount <= available, f"insufficient balance: have {available}")
-        self.balances[sender] = u256(available - amount)
-        self.total_paid_out_wei = u256(int(self.total_paid_out_wei) + amount)
-        _send_gen(sender, amount)
+            ids = json.loads(settlement_ids_json) if settlement_ids_json else []
+        except (json.JSONDecodeError, ValueError, TypeError):
+            raise gl.vm.UserError(ERR_EXPECTED + "settlement_ids_json is not valid JSON")
+        _require(isinstance(ids, list), "settlement_ids_json must be a JSON array")
+        for raw_id in ids:
+            sid = u32(int(raw_id))
+            settlement = self.settlements.get(sid)
+            if settlement is not None:
+                settlement.relayed = True
 
     # ========================================================================
     #  PUBLIC WRITES — administration
@@ -1346,9 +1429,9 @@ Respond with ONLY a JSON object, no markdown, with exactly these keys:
     @gl.public.write
     def pause(self) -> None:
         """Owner: halt new vaults, funding, claims and contests. Does NOT
-        halt resolve_claim or withdraw — funds already at stake must always
-        remain resolvable and withdrawable even while paused, so pausing
-        can never be used to trap value."""
+        halt resolve_claim — funds already at stake must always remain
+        resolvable even while paused, so pausing can never be used to trap
+        value."""
         self._only_owner()
         self.paused = True
 
@@ -1358,11 +1441,11 @@ Respond with ONLY a JSON object, no markdown, with exactly these keys:
         self.paused = False
 
     @gl.public.write
-    def set_minimum_bonds(self, min_claimant_bond_wei: int, min_contester_bond_wei: int) -> None:
+    def set_minimum_bonds(self, min_claimant_bond_usdc: int, min_contester_bond_usdc: int) -> None:
         self._only_owner()
-        _require(min_claimant_bond_wei >= 0 and min_contester_bond_wei >= 0, "minimums must be non-negative")
-        self.min_claimant_bond_wei = u256(int(min_claimant_bond_wei))
-        self.min_contester_bond_wei = u256(int(min_contester_bond_wei))
+        _require(min_claimant_bond_usdc >= 0 and min_contester_bond_usdc >= 0, "minimums must be non-negative")
+        self.min_claimant_bond_usdc = u256(int(min_claimant_bond_usdc))
+        self.min_contester_bond_usdc = u256(int(min_contester_bond_usdc))
 
     @gl.public.write
     def set_owner(self, new_owner: str) -> None:
@@ -1418,9 +1501,25 @@ Respond with ONLY a JSON object, no markdown, with exactly these keys:
         return [int(x) for x in arr] if arr is not None else []
 
     @gl.public.view
-    def get_balance_of(self, address: str) -> int:
-        current = self.balances.get(_coerce_address(address))
-        return int(current) if current is not None else 0
+    def get_settlements_for_vault(self, vault_id: int) -> list[dict]:
+        """Every settlement (pending or already-relayed) ever recorded for
+        this vault — the backend relayer's data source for pushing
+        ObolusEscrow.settle() calls on Base Sepolia."""
+        self._get_vault(vault_id)
+        return [self._settlement_dict(s) for s in self._get_settlements_for_vault(vault_id)]
+
+    @gl.public.view
+    def get_pending_settlements(self, vault_id: int) -> list[dict]:
+        """Subset of get_settlements_for_vault where relayed is still
+        False — exactly what the backend relayer's sweep job needs to push
+        to ObolusEscrow.settle() next, then confirm via
+        mark_settlements_relayed."""
+        self._get_vault(vault_id)
+        return [
+            self._settlement_dict(s)
+            for s in self._get_settlements_for_vault(vault_id)
+            if not bool(s.relayed)
+        ]
 
     @gl.public.view
     def is_resolvable(self, claim_id: int) -> bool:
@@ -1438,8 +1537,8 @@ Respond with ONLY a JSON object, no markdown, with exactly these keys:
         return {
             "vault_count": int(self.vault_count),
             "claim_count": int(self.claim_count),
-            "total_escrowed_wei": int(self.total_escrowed_wei),
-            "total_paid_out_wei": int(self.total_paid_out_wei),
+            "total_escrowed_usdc": int(self.total_escrowed_usdc),
+            "total_paid_out_usdc": int(self.total_paid_out_usdc),
             "total_claims_confirmed": int(self.total_claims_confirmed),
             "total_claims_refuted": int(self.total_claims_refuted),
             "total_claims_inconclusive": int(self.total_claims_inconclusive),
@@ -1451,8 +1550,8 @@ Respond with ONLY a JSON object, no markdown, with exactly these keys:
         return {
             "owner": self.owner.as_hex,
             "paused": bool(self.paused),
-            "min_claimant_bond_wei": int(self.min_claimant_bond_wei),
-            "min_contester_bond_wei": int(self.min_contester_bond_wei),
+            "min_claimant_bond_usdc": int(self.min_claimant_bond_usdc),
+            "min_contester_bond_usdc": int(self.min_contester_bond_usdc),
             "min_contest_window_seconds": MIN_CONTEST_WINDOW_SECONDS,
             "max_contest_window_seconds": MAX_CONTEST_WINDOW_SECONDS,
             "max_evidence_urls": MAX_EVIDENCE_URLS,

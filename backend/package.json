@@ -5,14 +5,19 @@
   "type": "module",
   "scripts": {
     "dev": "node --watch src/server.js",
-    "start": "node src/server.js"
+    "start": "node src/server.js",
+    "deploy:escrow": "node ../contracts/base/deploy.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
+    "ethers": "^6.13.4",
     "express": "^4.19.2",
     "genlayer-js": "^1.1.8",
     "ioredis": "^5.11.1",
     "viem": "^2.21.0"
+  },
+  "devDependencies": {
+    "solc": "^0.8.28"
   }
 }

@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import { GlassPanel, Icon, EmptyState, Spinner } from "../components/ui.jsx";
 import VaultCard from "../components/VaultCard.jsx";
 import { useAddress, shortenAddress } from "../lib/AddressContext.jsx";
-import { formatGen } from "../lib/gen.js";
+import { formatUsdc } from "../lib/usdc.js";
 import { api } from "../api.js";
 
 export default function DashboardPage() {
@@ -72,7 +72,7 @@ export default function DashboardPage() {
             ["Vaults", stats.vault_count],
             ["Claims", stats.claim_count],
             ["Confirmed", stats.total_claims_confirmed],
-            ["Escrowed", formatGen(stats.total_escrowed_wei)],
+            ["Escrowed", formatUsdc(stats.total_escrowed_usdc)],
           ].map(([label, value]) => (
             <GlassPanel key={label} className="p-5">
               <p className="text-label-sm font-mono text-on-surface-variant uppercase tracking-widest mb-1">{label}</p>
@@ -106,7 +106,7 @@ export default function DashboardPage() {
             </h2>
             {grantorVaults.length === 0 ? (
               <GlassPanel>
-                <EmptyState icon="inbox" title="No vaults granted yet" description="Create one to lock GEN for a beneficiary." />
+                <EmptyState icon="inbox" title="No vaults granted yet" description="Create one to lock USDC for a beneficiary." />
               </GlassPanel>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">

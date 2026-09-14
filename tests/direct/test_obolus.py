@@ -29,6 +29,19 @@ def hx(addr) -> str:
     return addr.as_hex
 
 
+def settled_amount(c, vault_id, address) -> int:
+    """Sum every settlement recorded for `vault_id` payable to `address` —
+    the USDC-migration replacement for the old get_balance_of(address)
+    check, now that payouts are relayed to Base Sepolia's ObolusEscrow
+    instead of held as an internal on-contract balance."""
+    target = hx(address).lower()
+    return sum(
+        s["amount_usdc"]
+        for s in c.get_settlements_for_vault(vault_id)
+        if s["recipient"].lower() == target
+    )
+
+
 def warp(vm, ts: int) -> None:
     """Set the VM's chain clock to an exact unix timestamp. The contract
     derives all of its now_ts values from datetime.datetime.now() (patched
@@ -78,7 +91,7 @@ def make_vault(
     now_ts=NOW,
 ) -> int:
     vm.sender = grantor
-    vm.value = deposit
+    vm.value = 0
     warp(vm, now_ts)
     return c.create_vault(
         hx(beneficiary),
@@ -86,6 +99,7 @@ def make_vault(
         json.dumps(akas or ["Janey Public"]),
         birth_year,
         window,
+        deposit,
     )
 
 
@@ -106,9 +120,15 @@ def mock_sources(vm, body="Official obituary: Jane Q. Public passed away."):
 
 def open_claim(vm, c, vault_id, claimant=CLAIMANT, bond=0, now_ts=NOW, image_url="") -> int:
     vm.sender = claimant
-    vm.value = bond
+    vm.value = 0
     warp(vm, now_ts)
-    return c.submit_death_claim(vault_id, DEATH_URLS, image_url, "I am the executor")
+    return c.submit_death_claim(vault_id, DEATH_URLS, image_url, "I am the executor", bond)
+
+
+def contest(vm, c, claim_id, sender=CONTESTER, bond=0, urls=None, image_url="") -> None:
+    vm.sender = sender
+    vm.value = 0
+    c.contest_claim(claim_id, urls if urls is not None else CONTEST_URLS, image_url, bond)
 
 
 # ---------------------------------------------------------------------------
@@ -120,8 +140,8 @@ def test_deploy_and_config(vm):
     cfg = c.get_config()
     assert cfg["owner"].lower() == hx(OWNER).lower()
     assert cfg["paused"] is False
-    assert cfg["min_claimant_bond_wei"] == GEN // 100
-    assert cfg["min_contester_bond_wei"] == GEN // 200
+    assert cfg["min_claimant_bond_usdc"] == GEN // 100
+    assert cfg["min_contester_bond_usdc"] == GEN // 200
 
 
 def test_only_owner_can_pause(vm):
@@ -149,7 +169,7 @@ def test_create_vault_happy_path(vm):
     vid = make_vault(vm, c)
     vault = c.get_vault(vid)
     assert vault["status"] == "ACTIVE"
-    assert vault["balance_wei"] == 10 * GEN
+    assert vault["balance_usdc"] == 10 * GEN
     assert vault["grantor"].lower() == hx(GRANTOR).lower()
     assert vault["beneficiary"].lower() == hx(BENEFICIARY).lower()
     assert vault["subject_name"] == "Jane Q. Public"
@@ -161,7 +181,7 @@ def test_create_vault_requires_positive_deposit(vm):
     vm.sender = GRANTOR
     vm.value = 0
     with vm.expect_revert():
-        c.create_vault(hx(BENEFICIARY), "Jane", "[]", 1960, DAY)
+        c.create_vault(hx(BENEFICIARY), "Jane", "[]", 1960, DAY, 0)
 
 
 def test_create_vault_rejects_zero_address_beneficiary(vm):
@@ -169,7 +189,7 @@ def test_create_vault_rejects_zero_address_beneficiary(vm):
     vm.sender = GRANTOR
     vm.value = GEN
     with vm.expect_revert():
-        c.create_vault("0x" + "00" * 20, "Jane", "[]", 1960, DAY)
+        c.create_vault("0x" + "00" * 20, "Jane", "[]", 1960, DAY, GEN)
 
 
 def test_create_vault_rejects_self_as_beneficiary(vm):
@@ -177,7 +197,7 @@ def test_create_vault_rejects_self_as_beneficiary(vm):
     vm.sender = GRANTOR
     vm.value = GEN
     with vm.expect_revert():
-        c.create_vault(hx(GRANTOR), "Jane", "[]", 1960, DAY)
+        c.create_vault(hx(GRANTOR), "Jane", "[]", 1960, DAY, GEN)
 
 
 def test_create_vault_rejects_empty_name(vm):
@@ -185,7 +205,7 @@ def test_create_vault_rejects_empty_name(vm):
     vm.sender = GRANTOR
     vm.value = GEN
     with vm.expect_revert():
-        c.create_vault(hx(BENEFICIARY), "   ", "[]", 1960, DAY)
+        c.create_vault(hx(BENEFICIARY), "   ", "[]", 1960, DAY, GEN)
 
 
 def test_create_vault_rejects_malformed_aka_json(vm):
@@ -193,7 +213,7 @@ def test_create_vault_rejects_malformed_aka_json(vm):
     vm.sender = GRANTOR
     vm.value = GEN
     with vm.expect_revert():
-        c.create_vault(hx(BENEFICIARY), "Jane", "not json", 1960, DAY)
+        c.create_vault(hx(BENEFICIARY), "Jane", "not json", 1960, DAY, GEN)
 
 
 def test_create_vault_rejects_too_many_akas(vm):
@@ -201,7 +221,7 @@ def test_create_vault_rejects_too_many_akas(vm):
     vm.sender = GRANTOR
     vm.value = GEN
     with vm.expect_revert():
-        c.create_vault(hx(BENEFICIARY), "Jane", json.dumps(["a"] * 7), 1960, DAY)
+        c.create_vault(hx(BENEFICIARY), "Jane", json.dumps(["a"] * 7), 1960, DAY, GEN)
 
 
 def test_create_vault_clamps_contest_window(vm):
@@ -220,9 +240,9 @@ def test_fund_vault_adds_to_balance(vm):
     c = fresh(vm)
     vid = make_vault(vm, c, deposit=5 * GEN)
     vm.sender = STRANGER  # anyone may top up
-    vm.value = 2 * GEN
-    c.fund_vault(vid)
-    assert c.get_vault(vid)["balance_wei"] == 7 * GEN
+    vm.value = 0
+    c.fund_vault(vid, 2 * GEN)
+    assert c.get_vault(vid)["balance_usdc"] == 7 * GEN
 
 
 def test_fund_vault_rejects_zero_value(vm):
@@ -231,7 +251,7 @@ def test_fund_vault_rejects_zero_value(vm):
     vm.sender = STRANGER
     vm.value = 0
     with vm.expect_revert():
-        c.fund_vault(vid)
+        c.fund_vault(vid, 0)
 
 
 def test_set_beneficiary_only_grantor(vm):
@@ -263,8 +283,8 @@ def test_cancel_vault_refunds_grantor(vm):
     vm.value = 0
     c.cancel_vault(vid)
     assert c.get_vault(vid)["status"] == "CANCELLED"
-    assert c.get_vault(vid)["balance_wei"] == 0
-    assert c.get_balance_of(hx(GRANTOR)) == 4 * GEN
+    assert c.get_vault(vid)["balance_usdc"] == 0
+    assert settled_amount(c, vid, GRANTOR) == 4 * GEN
 
 
 def test_cancel_vault_only_grantor(vm):
@@ -308,7 +328,7 @@ def test_submit_death_claim_requires_evidence_url(vm):
     vm.sender = CLAIMANT
     vm.value = 0
     with vm.expect_revert():
-        c.submit_death_claim(vid, "[]", "", "note")
+        c.submit_death_claim(vid, "[]", "", "note", 0)
 
 
 def test_submit_death_claim_rejects_malformed_json(vm):
@@ -317,16 +337,16 @@ def test_submit_death_claim_rejects_malformed_json(vm):
     vm.sender = CLAIMANT
     vm.value = 0
     with vm.expect_revert():
-        c.submit_death_claim(vid, "not json", "", "note")
+        c.submit_death_claim(vid, "not json", "", "note", 0)
 
 
 def test_submit_death_claim_below_minimum_bond_rejected(vm):
     c = fresh(vm, claimant_bond=GEN // 10)
     vid = make_vault(vm, c)
     vm.sender = CLAIMANT
-    vm.value = GEN // 100  # below minimum
+    vm.value = 0
     with vm.expect_revert():
-        c.submit_death_claim(vid, DEATH_URLS, "", "note")
+        c.submit_death_claim(vid, DEATH_URLS, "", "note", GEN // 100)  # below minimum
 
 
 def test_submit_death_claim_blocked_when_vault_not_active(vm):
@@ -342,7 +362,7 @@ def test_submit_death_claim_only_against_existing_vault(vm):
     vm.sender = CLAIMANT
     vm.value = 0
     with vm.expect_revert():
-        c.submit_death_claim(999, DEATH_URLS, "", "note")
+        c.submit_death_claim(999, DEATH_URLS, "", "note", 0)
 
 
 # ---------------------------------------------------------------------------
@@ -353,10 +373,8 @@ def test_contest_claim_within_window(vm):
     c = fresh(vm)
     vid = make_vault(vm, c, window=DAY)
     cid = open_claim(vm, c, vid, now_ts=NOW)
-    vm.sender = CONTESTER
-    vm.value = 0
     warp(vm, NOW + HOUR)
-    c.contest_claim(cid, CONTEST_URLS, "")
+    contest(vm, c, cid)
     claim = c.get_claim(cid)
     assert claim["status"] == "CONTESTED"
     assert claim["contest_count"] == 1
@@ -369,22 +387,18 @@ def test_contest_claim_after_window_rejected(vm):
     c = fresh(vm)
     vid = make_vault(vm, c, window=HOUR)
     cid = open_claim(vm, c, vid, now_ts=NOW)
-    vm.sender = CONTESTER
-    vm.value = 0
     warp(vm, NOW + 2 * HOUR)
     with vm.expect_revert():
-        c.contest_claim(cid, CONTEST_URLS, "")
+        contest(vm, c, cid)
 
 
 def test_contest_claim_below_minimum_bond_rejected(vm):
     c = fresh(vm, contester_bond=GEN // 10)
     vid = make_vault(vm, c, window=DAY)
     cid = open_claim(vm, c, vid, now_ts=NOW)
-    vm.sender = CONTESTER
-    vm.value = GEN // 100
     warp(vm, NOW + HOUR)
     with vm.expect_revert():
-        c.contest_claim(cid, CONTEST_URLS, "")
+        contest(vm, c, cid, bond=GEN // 100)  # below minimum
 
 
 def test_second_contest_appends_without_erasing_first(vm):
@@ -397,25 +411,21 @@ def test_second_contest_appends_without_erasing_first(vm):
     cid = open_claim(vm, c, vid, now_ts=NOW)
 
     first_urls = json.dumps([archived("https://social.example.com/first-contester-proof")])
-    vm.sender = CONTESTER
-    vm.value = GEN // 100
     warp(vm, NOW + HOUR)
-    c.contest_claim(cid, first_urls, "")
+    contest(vm, c, cid, sender=CONTESTER, bond=GEN // 100, urls=first_urls)
 
     second_contester = create_address("second_contester")
     second_urls = json.dumps([archived("https://social.example.com/second-contester-proof")])
-    vm.sender = second_contester
-    vm.value = GEN // 100
     warp(vm, NOW + 2 * HOUR)
-    c.contest_claim(cid, second_urls, "")
+    contest(vm, c, cid, sender=second_contester, bond=GEN // 100, urls=second_urls)
 
     # neither bond is refunded early — both remain staked pending resolution
-    assert c.get_balance_of(hx(CONTESTER)) == 0
-    assert c.get_balance_of(hx(second_contester)) == 0
+    assert settled_amount(c, vid, CONTESTER) == 0
+    assert settled_amount(c, vid, second_contester) == 0
 
     claim = c.get_claim(cid)
     assert claim["contest_count"] == 2
-    assert claim["total_contester_bond_wei"] == GEN // 50
+    assert claim["total_contester_bond_usdc"] == GEN // 50
 
     contests = c.get_contests_for_claim(cid)
     assert len(contests) == 2
@@ -433,15 +443,12 @@ def test_contest_limit_per_claim_enforced(vm):
     import _contract_obolus as mod
 
     for i in range(mod.MAX_CONTESTS_PER_CLAIM):
-        vm.sender = create_address(f"contester_{i}")
-        vm.value = 0
         warp(vm, NOW + HOUR)
-        c.contest_claim(cid, CONTEST_URLS, "")
+        contest(vm, c, cid, sender=create_address(f"contester_{i}"))
 
-    vm.sender = create_address("one_too_many")
-    vm.value = 0
+    warp(vm, NOW + HOUR)
     with vm.expect_revert():
-        c.contest_claim(cid, CONTEST_URLS, "")
+        contest(vm, c, cid, sender=create_address("one_too_many"))
 
 
 def test_resolve_confirmed_forfeits_every_contesters_bond(vm):
@@ -452,14 +459,10 @@ def test_resolve_confirmed_forfeits_every_contesters_bond(vm):
     cid = open_claim(vm, c, vid, now_ts=NOW)
 
     second_contester = create_address("second_contester")
-    vm.sender = CONTESTER
-    vm.value = GEN // 100
     warp(vm, NOW + HOUR)
-    c.contest_claim(cid, CONTEST_URLS, "")
-    vm.sender = second_contester
-    vm.value = GEN // 100
+    contest(vm, c, cid, sender=CONTESTER, bond=GEN // 100)
     warp(vm, NOW + 2 * HOUR)
-    c.contest_claim(cid, CONTEST_URLS, "")
+    contest(vm, c, cid, sender=second_contester, bond=GEN // 100)
 
     mock_sources(vm)
     vm.mock_llm(r".*", verdict("DECEASED", "HIGH"))
@@ -469,9 +472,9 @@ def test_resolve_confirmed_forfeits_every_contesters_bond(vm):
     c.resolve_claim(cid)
 
     # both overruled contesters' bonds flow to the beneficiary, not stranded
-    assert c.get_balance_of(hx(BENEFICIARY)) == 3 * GEN + GEN // 50
-    assert c.get_balance_of(hx(CONTESTER)) == 0
-    assert c.get_balance_of(hx(second_contester)) == 0
+    assert settled_amount(c, vid, BENEFICIARY) == 3 * GEN + GEN // 50
+    assert settled_amount(c, vid, CONTESTER) == 0
+    assert settled_amount(c, vid, second_contester) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -563,23 +566,21 @@ def test_resolve_confirmed_pays_beneficiary_and_refunds_claimant_bond(vm):
     assert result["status"] == "CONFIRMED"
     vault = c.get_vault(vid)
     assert vault["status"] == "PAYOUT_READY"
-    assert vault["balance_wei"] == 0
+    assert vault["balance_usdc"] == 0
     assert vault["active_claim_id"] == 0
-    assert c.get_balance_of(hx(BENEFICIARY)) == 6 * GEN
-    assert c.get_balance_of(hx(CLAIMANT)) == GEN // 100
+    assert settled_amount(c, vid, BENEFICIARY) == 6 * GEN
+    assert settled_amount(c, vid, CLAIMANT) == GEN // 100
     stats = c.get_platform_stats()
     assert stats["total_claims_confirmed"] == 1
-    assert stats["total_escrowed_wei"] == 0
+    assert stats["total_escrowed_usdc"] == 0
 
 
 def test_resolve_confirmed_forfeits_overruled_contester_bond_to_beneficiary(vm):
     c = fresh(vm, contester_bond=GEN // 100)
     vid = make_vault(vm, c, window=DAY, deposit=3 * GEN)
     cid = open_claim(vm, c, vid, now_ts=NOW)
-    vm.sender = CONTESTER
-    vm.value = GEN // 100
     warp(vm, NOW + HOUR)
-    c.contest_claim(cid, CONTEST_URLS, "")
+    contest(vm, c, cid, sender=CONTESTER, bond=GEN // 100)
 
     mock_sources(vm)
     vm.mock_llm(r".*", verdict("DECEASED", "HIGH"))
@@ -590,8 +591,8 @@ def test_resolve_confirmed_forfeits_overruled_contester_bond_to_beneficiary(vm):
 
     # contester was overruled: bond flows to the beneficiary along with the
     # vault balance, never stranded
-    assert c.get_balance_of(hx(BENEFICIARY)) == 3 * GEN + GEN // 100
-    assert c.get_balance_of(hx(CONTESTER)) == 0
+    assert settled_amount(c, vid, BENEFICIARY) == 3 * GEN + GEN // 100
+    assert settled_amount(c, vid, CONTESTER) == 0
 
 
 def test_resolve_refuted_slashes_claimant_bond_into_vault_and_reopens(vm):
@@ -608,9 +609,9 @@ def test_resolve_refuted_slashes_claimant_bond_into_vault_and_reopens(vm):
     assert result["status"] == "REFUTED"
     vault = c.get_vault(vid)
     assert vault["status"] == "ACTIVE"  # reopened, never stranded
-    assert vault["balance_wei"] == 5 * GEN + GEN // 100  # slashed bond stays in escrow
+    assert vault["balance_usdc"] == 5 * GEN + GEN // 100  # slashed bond stays in escrow
     assert vault["active_claim_id"] == 0
-    assert c.get_balance_of(hx(CLAIMANT)) == 0  # bond forfeited, not returned
+    assert settled_amount(c, vid, CLAIMANT) == 0  # bond forfeited, not returned
     assert c.get_platform_stats()["total_claims_refuted"] == 1
 
 
@@ -618,10 +619,8 @@ def test_resolve_refuted_returns_contester_bond(vm):
     c = fresh(vm, contester_bond=GEN // 100)
     vid = make_vault(vm, c, window=DAY)
     cid = open_claim(vm, c, vid, now_ts=NOW)
-    vm.sender = CONTESTER
-    vm.value = GEN // 100
     warp(vm, NOW + HOUR)
-    c.contest_claim(cid, CONTEST_URLS, "")
+    contest(vm, c, cid, sender=CONTESTER, bond=GEN // 100)
 
     mock_sources(vm)
     vm.mock_llm(r".*", verdict("ALIVE_OR_REFUTED", "HIGH"))
@@ -629,17 +628,15 @@ def test_resolve_refuted_returns_contester_bond(vm):
     vm.value = 0
     warp(vm, NOW + DAY)
     c.resolve_claim(cid)
-    assert c.get_balance_of(hx(CONTESTER)) == GEN // 100  # vindicated, refunded
+    assert settled_amount(c, vid, CONTESTER) == GEN // 100  # vindicated, refunded
 
 
 def test_resolve_inconclusive_returns_both_bonds_and_reopens_vault(vm):
     c = fresh(vm, claimant_bond=GEN // 100, contester_bond=GEN // 50)
     vid = make_vault(vm, c, window=DAY, deposit=2 * GEN)
     cid = open_claim(vm, c, vid, bond=GEN // 100, now_ts=NOW)
-    vm.sender = CONTESTER
-    vm.value = GEN // 50
     warp(vm, NOW + HOUR)
-    c.contest_claim(cid, CONTEST_URLS, "")
+    contest(vm, c, cid, sender=CONTESTER, bond=GEN // 50)
 
     mock_sources(vm)
     vm.mock_llm(r".*", verdict("INSUFFICIENT", "LOW"))
@@ -651,9 +648,9 @@ def test_resolve_inconclusive_returns_both_bonds_and_reopens_vault(vm):
     assert result["status"] == "INCONCLUSIVE"
     vault = c.get_vault(vid)
     assert vault["status"] == "ACTIVE"
-    assert vault["balance_wei"] == 2 * GEN  # untouched
-    assert c.get_balance_of(hx(CLAIMANT)) == GEN // 100  # bond returned, no fault
-    assert c.get_balance_of(hx(CONTESTER)) == GEN // 50  # bond returned, no fault
+    assert vault["balance_usdc"] == 2 * GEN  # untouched
+    assert settled_amount(c, vid, CLAIMANT) == GEN // 100  # bond returned, no fault
+    assert settled_amount(c, vid, CONTESTER) == GEN // 50  # bond returned, no fault
     assert c.get_platform_stats()["total_claims_inconclusive"] == 1
 
 
@@ -673,7 +670,7 @@ def test_medium_confidence_never_flips_a_terminal_state(vm):
     result = c.resolve_claim(cid)
     assert result["status"] == "INCONCLUSIVE"
     assert c.get_vault(vid)["status"] == "ACTIVE"
-    assert c.get_vault(vid)["balance_wei"] == GEN  # untouched
+    assert c.get_vault(vid)["balance_usdc"] == GEN  # untouched
 
 
 def test_reopened_vault_accepts_a_fresh_claim(vm):
@@ -710,11 +707,15 @@ def test_resolve_claim_cannot_run_twice(vm):
     c.resolve_claim(cid)
     with vm.expect_revert():
         c.resolve_claim(cid)
-    # balance was credited exactly once
-    assert c.get_balance_of(hx(BENEFICIARY)) == 3 * GEN
+    # settlement was recorded exactly once
+    assert settled_amount(c, vid, BENEFICIARY) == 3 * GEN
 
 
-def test_double_withdraw_rejected(vm):
+def test_settlements_are_pending_until_marked_relayed(vm):
+    """Settlements start unrelayed (the backend relayer's sweep target) and
+    move out of get_pending_settlements once mark_settlements_relayed is
+    called — the bookkeeping flag the relayer flips after successfully
+    pushing them to ObolusEscrow.settle() on Base Sepolia."""
     c = fresh(vm)
     vid = make_vault(vm, c, window=HOUR, deposit=2 * GEN)
     cid = open_claim(vm, c, vid, now_ts=NOW)
@@ -725,28 +726,14 @@ def test_double_withdraw_rejected(vm):
     warp(vm, NOW + HOUR)
     c.resolve_claim(cid)
 
-    vm.sender = BENEFICIARY
-    vm.value = 0
-    c.withdraw(2 * GEN)
-    assert c.get_balance_of(hx(BENEFICIARY)) == 0
-    with vm.expect_revert():
-        c.withdraw(1)  # nothing left
+    pending = c.get_pending_settlements(vid)
+    assert len(pending) == 1  # beneficiary payout (claimant posted no bond here)
+    ids = [s["id"] for s in pending]
 
-
-def test_withdraw_more_than_balance_rejected(vm):
-    c = fresh(vm)
-    vm.sender = STRANGER
-    vm.value = 0
-    with vm.expect_revert():
-        c.withdraw(GEN)
-
-
-def test_withdraw_zero_rejected(vm):
-    c = fresh(vm)
-    vm.sender = STRANGER
-    vm.value = 0
-    with vm.expect_revert():
-        c.withdraw(0)
+    c.mark_settlements_relayed(json.dumps(ids))
+    assert c.get_pending_settlements(vid) == []
+    relayed = c.get_settlements_for_vault(vid)
+    assert all(s["relayed"] for s in relayed)
 
 
 # ---------------------------------------------------------------------------
@@ -768,7 +755,7 @@ def test_all_sources_fetch_failed_does_not_confirm_death(vm):
     warp(vm, NOW + HOUR)
     result = c.resolve_claim(cid)
     assert result["status"] == "INCONCLUSIVE"
-    assert c.get_vault(vid)["balance_wei"] == GEN  # untouched
+    assert c.get_vault(vid)["balance_usdc"] == GEN  # untouched
 
 
 def test_empty_llm_output_is_handled_without_crashing_state(vm):
@@ -877,9 +864,9 @@ def test_set_owner_rejects_zero_address(vm):
         c.set_owner("0x" + "00" * 20)
 
 
-def test_pause_blocks_new_vaults_but_not_resolution_or_withdraw(vm):
-    """Funds already at stake must remain resolvable/withdrawable even
-    while paused, so pausing can never be used to trap value."""
+def test_pause_blocks_new_vaults_but_not_resolution(vm):
+    """Funds already at stake must remain resolvable even while paused, so
+    pausing can never be used to trap value."""
     c = fresh(vm)
     vid = make_vault(vm, c, window=HOUR, deposit=GEN)
     cid = open_claim(vm, c, vid, now_ts=NOW)
@@ -889,9 +876,9 @@ def test_pause_blocks_new_vaults_but_not_resolution_or_withdraw(vm):
     c.pause()
 
     vm.sender = GRANTOR
-    vm.value = GEN
+    vm.value = 0
     with vm.expect_revert():
-        c.create_vault(hx(BENEFICIARY), "Someone Else", "[]", 1970, DAY)
+        c.create_vault(hx(BENEFICIARY), "Someone Else", "[]", 1970, DAY, GEN)
 
     mock_sources(vm)
     vm.mock_llm(r".*", verdict("DECEASED", "HIGH"))
@@ -900,11 +887,7 @@ def test_pause_blocks_new_vaults_but_not_resolution_or_withdraw(vm):
     warp(vm, NOW + HOUR)
     result = c.resolve_claim(cid)  # still works while paused
     assert result["status"] == "CONFIRMED"
-
-    vm.sender = BENEFICIARY
-    vm.value = 0
-    c.withdraw(GEN)  # still works while paused
-    assert c.get_balance_of(hx(BENEFICIARY)) == 0
+    assert settled_amount(c, vid, BENEFICIARY) == GEN
 
 
 # ---------------------------------------------------------------------------
@@ -946,8 +929,8 @@ def test_get_vault_unknown_id_reverts(vm):
 def test_platform_stats_track_escrow_totals_across_lifecycle(vm):
     c = fresh(vm)
     vid = make_vault(vm, c, deposit=3 * GEN)
-    assert c.get_platform_stats()["total_escrowed_wei"] == 3 * GEN
+    assert c.get_platform_stats()["total_escrowed_usdc"] == 3 * GEN
     vm.sender = GRANTOR
     vm.value = 0
     c.cancel_vault(vid)
-    assert c.get_platform_stats()["total_escrowed_wei"] == 0
+    assert c.get_platform_stats()["total_escrowed_usdc"] == 0

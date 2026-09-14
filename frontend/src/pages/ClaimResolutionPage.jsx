@@ -4,7 +4,7 @@ import { GlassPanel, Icon, Button, ErrorBanner, Spinner, EmptyState } from "../c
 import StatusBadge from "../components/StatusBadge.jsx";
 import EvidenceList from "../components/EvidenceList.jsx";
 import WithdrawCard from "../components/WithdrawCard.jsx";
-import { formatGen } from "../lib/gen.js";
+import { formatUsdc } from "../lib/usdc.js";
 import { formatTs } from "../lib/time.js";
 import { api } from "../api.js";
 import { write } from "../lib/writes.js";
@@ -28,17 +28,17 @@ function PayoutRow({ label, description, amount, tone }) {
 }
 
 function PayoutBreakdown({ claim, contests }) {
-  const claimantBond = claim.claimant_bond_wei;
+  const claimantBond = claim.claimant_bond_usdc;
 
   function contesterRows(description, tone, sign = "") {
     return contests
-      .filter((c) => Number(c.bond_wei) > 0)
+      .filter((c) => Number(c.bond_usdc) > 0)
       .map((c) => (
         <PayoutRow
           key={c.id}
           label={`Contester Bond (#${c.id})`}
           description={description}
-          amount={`${sign}${formatGen(c.bond_wei)}`}
+          amount={`${sign}${formatUsdc(c.bond_usdc)}`}
           tone={tone}
         />
       ));
@@ -48,7 +48,7 @@ function PayoutBreakdown({ claim, contests }) {
     return (
       <>
         <PayoutRow label="Vault Principal" description="Released to the beneficiary's withdrawable balance." amount="→ Beneficiary" />
-        <PayoutRow label="Claimant Bond" description="Returned in full — the claim was upheld." amount={formatGen(claimantBond)} tone="text-tertiary" />
+        <PayoutRow label="Claimant Bond" description="Returned in full — the claim was upheld." amount={formatUsdc(claimantBond)} tone="text-tertiary" />
         {contesterRows("Forfeited into the beneficiary's payout — the contest was overruled.", "text-tertiary", "+")}
       </>
     );
@@ -56,7 +56,7 @@ function PayoutBreakdown({ claim, contests }) {
   if (claim.status === "REFUTED") {
     return (
       <>
-        <PayoutRow label="Claimant Bond" description="Forfeited into the vault balance — the claim was disproven." amount={formatGen(claimantBond)} tone="text-error" />
+        <PayoutRow label="Claimant Bond" description="Forfeited into the vault balance — the claim was disproven." amount={formatUsdc(claimantBond)} tone="text-error" />
         {contesterRows("Returned in full — the contest was vindicated.", "text-tertiary")}
         <PayoutRow label="Vault" description="Reopens ACTIVE with the forfeited bond added to its balance." amount="Reopened" />
       </>
@@ -65,7 +65,7 @@ function PayoutBreakdown({ claim, contests }) {
   if (claim.status === "INCONCLUSIVE") {
     return (
       <>
-        <PayoutRow label="Claimant Bond" description="Returned in full — abstention penalizes nobody." amount={formatGen(claimantBond)} tone="text-tertiary" />
+        <PayoutRow label="Claimant Bond" description="Returned in full — abstention penalizes nobody." amount={formatUsdc(claimantBond)} tone="text-tertiary" />
         {contesterRows("Returned in full.", "text-tertiary")}
         <PayoutRow label="Vault" description="Untouched, reopens ACTIVE for a future claim." amount="Reopened" />
       </>
@@ -94,7 +94,14 @@ export default function ClaimResolutionPage() {
     setResolving(true);
     setError("");
     try {
-      await write(glClient, "resolve_claim", [Number(id)]);
+      const result = await write(glClient, "resolve_claim", [Number(id)]);
+      const vaultId = result?.resultValue?.vault_id;
+      if (vaultId) {
+        // Sweep whatever settlements this verdict produced onto Base
+        // Sepolia — see backend/src/baseSepolia.js. Best-effort: a
+        // failure here just delays claiming, never loses the settlement.
+        api.relaySettlements(vaultId).catch(() => {});
+      }
       load();
     } catch (err) {
       setError(err.message);
@@ -197,7 +204,7 @@ export default function ClaimResolutionPage() {
         </div>
 
         <div className="lg:col-span-4 space-y-gutter">
-          <WithdrawCard />
+          <WithdrawCard vaultId={claim.vault_id} />
           <GlassPanel className="p-6">
             <h3 className="text-label-sm font-mono text-on-surface-variant uppercase mb-4">Claim Timing</h3>
             <div className="space-y-3 text-body-md">

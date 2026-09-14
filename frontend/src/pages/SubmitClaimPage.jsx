@@ -1,21 +1,23 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams, Link } from "react-router-dom";
 import { GlassPanel, Icon, Field, Input, Textarea, Button, ErrorBanner, Spinner } from "../components/ui.jsx";
-import { genToWei } from "../lib/gen.js";
+import { usdcToUnits } from "../lib/usdc.js";
 import { api } from "../api.js";
 import { write } from "../lib/writes.js";
+import { sendBaseSepoliaSteps } from "../lib/baseSepoliaWallet.js";
 import { useAddress } from "../lib/AddressContext.jsx";
 
 export default function SubmitClaimPage() {
   const { id } = useParams();
   const navigate = useNavigate();
-  const { glClient } = useAddress();
+  const { address, glClient } = useAddress();
   const [vault, setVault] = useState(null);
   const [urls, setUrls] = useState("");
   const [imageUrl, setImageUrl] = useState("");
   const [note, setNote] = useState("");
-  const [bondGen, setBondGen] = useState("0");
+  const [bondUsdc, setBondUsdc] = useState("0");
   const [submitting, setSubmitting] = useState(false);
+  const [step, setStep] = useState("");
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -31,18 +33,29 @@ export default function SubmitClaimPage() {
         .split("\n")
         .map((u) => u.trim())
         .filter(Boolean);
-      const receipt = await write(
-        glClient,
-        "submit_death_claim",
-        [Number(id), JSON.stringify(urlList), imageUrl, note],
-        genToWei(bondGen)
-      );
-      const claimId = receipt?.data?.result;
+      const bondUnits = usdcToUnits(bondUsdc);
+      setStep("Declaring claim on GenLayer…");
+      const receipt = await write(glClient, "submit_death_claim", [
+        Number(id),
+        JSON.stringify(urlList),
+        imageUrl,
+        note,
+        Number(bondUnits),
+      ]);
+      const claimId = receipt?.resultValue;
+
+      if (bondUnits > 0n) {
+        setStep("Depositing bond on Base Sepolia (approve, then deposit)…");
+        const { steps } = await api.getEscrowFundCalldata(id, bondUnits.toString());
+        await sendBaseSepoliaSteps(address, steps);
+      }
+
       navigate(claimId ? `/claims/${claimId}` : `/vaults/${id}`);
     } catch (err) {
       setError(err.message);
     } finally {
       setSubmitting(false);
+      setStep("");
     }
   }
 
@@ -110,11 +123,12 @@ export default function SubmitClaimPage() {
             <Textarea rows={3} value={note} onChange={(e) => setNote(e.target.value)} maxLength={800} />
           </Field>
 
-          <Field label="Bond (GEN)" hint="Returned if CONFIRMED or INCONCLUSIVE. Forfeited into the vault if REFUTED.">
-            <Input type="number" step="any" min="0" value={bondGen} onChange={(e) => setBondGen(e.target.value)} required />
+          <Field label="Bond (USDC)" hint="Returned if CONFIRMED or INCONCLUSIVE. Forfeited into the vault if REFUTED.">
+            <Input type="number" step="any" min="0" value={bondUsdc} onChange={(e) => setBondUsdc(e.target.value)} required />
           </Field>
 
           <div className="flex items-center justify-end gap-4 pt-2">
+            {submitting && step && <span className="text-label-sm font-mono text-on-surface-variant">{step}</span>}
             <Button type="submit" loading={submitting}>
               {submitting ? "Submitting…" : "Submit Claim"}
             </Button>

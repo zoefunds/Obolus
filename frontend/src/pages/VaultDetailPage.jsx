@@ -5,10 +5,11 @@ import StatusBadge from "../components/StatusBadge.jsx";
 import ClaimTimeline from "../components/ClaimTimeline.jsx";
 import EvidenceList from "../components/EvidenceList.jsx";
 import { useAddress, shortenAddress } from "../lib/AddressContext.jsx";
-import { formatGen, genToWei } from "../lib/gen.js";
+import { formatUsdc, usdcToUnits } from "../lib/usdc.js";
 import { formatTs } from "../lib/time.js";
 import { api } from "../api.js";
 import { write } from "../lib/writes.js";
+import { sendBaseSepoliaSteps } from "../lib/baseSepoliaWallet.js";
 
 function ParticipantsCard({ vault }) {
   return (
@@ -50,11 +51,12 @@ function ParticipantsCard({ vault }) {
   );
 }
 
-function GrantorControls({ vault, glClient, onChanged }) {
+function GrantorControls({ vault, address, glClient, onChanged }) {
   const [mode, setMode] = useState(null); // "fund" | "beneficiary" | null
   const [amount, setAmount] = useState("");
   const [newBeneficiary, setNewBeneficiary] = useState("");
   const [busy, setBusy] = useState(false);
+  const [step, setStep] = useState("");
   const [error, setError] = useState("");
 
   async function fund(e) {
@@ -62,7 +64,12 @@ function GrantorControls({ vault, glClient, onChanged }) {
     setBusy(true);
     setError("");
     try {
-      await write(glClient, "fund_vault", [vault.id], genToWei(amount));
+      const amountUnits = usdcToUnits(amount);
+      setStep("Declaring top-up on GenLayer…");
+      await write(glClient, "fund_vault", [vault.id, Number(amountUnits)]);
+      setStep("Depositing USDC on Base Sepolia…");
+      const { steps } = await api.getEscrowFundCalldata(vault.id, amountUnits.toString());
+      await sendBaseSepoliaSteps(address, steps);
       setMode(null);
       setAmount("");
       onChanged();
@@ -70,6 +77,7 @@ function GrantorControls({ vault, glClient, onChanged }) {
       setError(err.message);
     } finally {
       setBusy(false);
+      setStep("");
     }
   }
 
@@ -95,6 +103,10 @@ function GrantorControls({ vault, glClient, onChanged }) {
     setError("");
     try {
       await write(glClient, "cancel_vault", [vault.id]);
+      // Sweep the refund settlement onto Base Sepolia so the grantor can
+      // actually claim it — see backend/src/baseSepolia.js. Best-effort:
+      // a failure here just means claiming has to wait for a later sweep.
+      api.relaySettlements(vault.id).catch(() => {});
       onChanged();
     } catch (err) {
       setError(err.message);
@@ -109,9 +121,10 @@ function GrantorControls({ vault, glClient, onChanged }) {
       <ErrorBanner message={error} />
       {mode === "fund" ? (
         <form onSubmit={fund} className="space-y-3">
-          <Field label="Additional GEN">
+          <Field label="Additional USDC">
             <Input type="number" step="any" min="0" value={amount} onChange={(e) => setAmount(e.target.value)} required autoFocus />
           </Field>
+          {busy && step && <p className="text-label-sm font-mono text-on-surface-variant">{step}</p>}
           <div className="flex gap-2">
             <Button type="submit" loading={busy} className="flex-1">
               Confirm
@@ -152,11 +165,12 @@ function GrantorControls({ vault, glClient, onChanged }) {
   );
 }
 
-function ContestForm({ claimId, glClient, onSubmitted }) {
+function ContestForm({ claimId, vaultId, address, glClient, onSubmitted }) {
   const [urls, setUrls] = useState("");
   const [imageUrl, setImageUrl] = useState("");
-  const [bondGen, setBondGen] = useState("0");
+  const [bondUsdc, setBondUsdc] = useState("0");
   const [busy, setBusy] = useState(false);
+  const [step, setStep] = useState("");
   const [error, setError] = useState("");
 
   async function submit(e) {
@@ -168,17 +182,20 @@ function ContestForm({ claimId, glClient, onSubmitted }) {
         .split("\n")
         .map((u) => u.trim())
         .filter(Boolean);
-      await write(
-        glClient,
-        "contest_claim",
-        [claimId, JSON.stringify(urlList), imageUrl],
-        genToWei(bondGen)
-      );
+      const bondUnits = usdcToUnits(bondUsdc);
+      setStep("Declaring contest on GenLayer…");
+      await write(glClient, "contest_claim", [claimId, JSON.stringify(urlList), imageUrl, Number(bondUnits)]);
+      if (bondUnits > 0n) {
+        setStep("Depositing bond on Base Sepolia…");
+        const { steps } = await api.getEscrowFundCalldata(vaultId, bondUnits.toString());
+        await sendBaseSepoliaSteps(address, steps);
+      }
       onSubmitted();
     } catch (err) {
       setError(err.message);
     } finally {
       setBusy(false);
+      setStep("");
     }
   }
 
@@ -204,9 +221,10 @@ function ContestForm({ claimId, glClient, onSubmitted }) {
           placeholder="https://web.archive.org/web/20240101000000/https://..."
         />
       </Field>
-      <Field label="Bond (GEN)">
-        <Input type="number" step="any" min="0" value={bondGen} onChange={(e) => setBondGen(e.target.value)} required />
+      <Field label="Bond (USDC)">
+        <Input type="number" step="any" min="0" value={bondUsdc} onChange={(e) => setBondUsdc(e.target.value)} required />
       </Field>
+      {busy && step && <p className="text-label-sm font-mono text-on-surface-variant">{step}</p>}
       <Button type="submit" loading={busy} className="w-full">
         Submit Counter-Evidence
       </Button>
@@ -314,7 +332,7 @@ export default function VaultDetailPage() {
             <div className="relative z-10">
               <p className="text-label-sm font-mono text-on-surface-variant mb-2">VAULT BALANCE</p>
               <div className="flex items-baseline gap-3">
-                <span className="text-[36px] font-extrabold text-primary leading-none">{formatGen(vault.balance_wei)}</span>
+                <span className="text-[36px] font-extrabold text-primary leading-none">{formatUsdc(vault.balance_usdc)}</span>
               </div>
             </div>
           </GlassPanel>
@@ -342,6 +360,8 @@ export default function VaultDetailPage() {
                   <div className="pt-4 border-t border-outline-variant/20">
                     <ContestForm
                       claimId={activeClaim.id}
+                      vaultId={vault.id}
+                      address={address}
                       glClient={glClient}
                       onSubmitted={() => {
                         setShowContest(false);
@@ -381,7 +401,9 @@ export default function VaultDetailPage() {
         <div className="lg:col-span-4 space-y-gutter">
           <ParticipantsCard vault={vault} />
 
-          {isGrantor && vault.status === "ACTIVE" && <GrantorControls vault={vault} glClient={glClient} onChanged={load} />}
+          {isGrantor && vault.status === "ACTIVE" && (
+            <GrantorControls vault={vault} address={address} glClient={glClient} onChanged={load} />
+          )}
 
           <GlassPanel className="p-6 space-y-4">
             <h2 className="text-label-sm font-mono text-on-surface-variant uppercase">Actions</h2>

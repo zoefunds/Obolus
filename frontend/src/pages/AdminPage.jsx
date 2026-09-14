@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { GlassPanel, Icon, Field, Input, Button, ErrorBanner } from "../components/ui.jsx";
 import { shortenAddress, useAddress } from "../lib/AddressContext.jsx";
-import { formatGen } from "../lib/gen.js";
+import { formatUsdc } from "../lib/usdc.js";
 import { api } from "../api.js";
 import { write } from "../lib/writes.js";
 
@@ -28,8 +28,8 @@ export default function AdminPage() {
   const load = () => {
     api.getConfig().then((c) => {
       setConfig(c);
-      setClaimantBond(String(c.min_claimant_bond_wei));
-      setContesterBond(String(c.min_contester_bond_wei));
+      setClaimantBond(String(c.min_claimant_bond_usdc));
+      setContesterBond(String(c.min_contester_bond_usdc));
     });
     api.getStats().then(setStats);
   };
@@ -69,8 +69,8 @@ export default function AdminPage() {
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           <StatTile label="Vaults" value={stats.vault_count} />
           <StatTile label="Claims" value={stats.claim_count} />
-          <StatTile label="Escrowed" value={formatGen(stats.total_escrowed_wei)} />
-          <StatTile label="Paid Out" value={formatGen(stats.total_paid_out_wei)} />
+          <StatTile label="Escrowed" value={formatUsdc(stats.total_escrowed_usdc)} />
+          <StatTile label="Paid Out" value={formatUsdc(stats.total_paid_out_usdc)} />
           <StatTile label="Confirmed" value={stats.total_claims_confirmed} />
           <StatTile label="Refuted" value={stats.total_claims_refuted} />
           <StatTile label="Inconclusive" value={stats.total_claims_inconclusive} />
@@ -87,8 +87,9 @@ export default function AdminPage() {
           Platform pause
         </h2>
         <p className="text-body-md text-on-surface-variant">
-          Halts new vaults, funding, claims, and contests. Never blocks <code className="font-mono text-secondary">resolve_claim</code> or{" "}
-          <code className="font-mono text-secondary">withdraw</code> — funds already at stake stay resolvable and withdrawable.
+          Halts new vaults, funding, claims, and contests. Never blocks{" "}
+          <code className="font-mono text-secondary">resolve_claim</code> — funds already at stake stay resolvable, and
+          claiming happens directly against Base Sepolia's ObolusEscrow regardless of pause state.
         </p>
         <div className="flex gap-3">
           <Button variant="secondary" loading={busy === "pause"} onClick={() => run("pause", () => write(glClient, "pause", []))}>
@@ -106,10 +107,10 @@ export default function AdminPage() {
           Minimum bonds
         </h2>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <Field label="Min. claimant bond (wei)">
+          <Field label="Min. claimant bond (USDC base units)">
             <Input value={claimantBond} onChange={(e) => setClaimantBond(e.target.value)} />
           </Field>
-          <Field label="Min. contester bond (wei)">
+          <Field label="Min. contester bond (USDC base units)">
             <Input value={contesterBond} onChange={(e) => setContesterBond(e.target.value)} />
           </Field>
         </div>
