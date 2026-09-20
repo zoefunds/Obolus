@@ -71,11 +71,29 @@ DEATH_URLS = json.dumps(
 CONTEST_URLS = json.dumps([archived("https://social.example.com/live-post-today")])
 
 
-def fresh(vm, claimant_bond=0, contester_bond=0):
+def fresh(vm, claimant_bond=0, contester_bond=0, relayer=None):
     vm.sender = OWNER
     vm.value = 0
     warp(vm, NOW)
-    return deploy_contract(CONTRACT, vm, claimant_bond, contester_bond)
+    return deploy_contract(CONTRACT, vm, claimant_bond, contester_bond, hx(relayer) if relayer else "")
+
+
+_payment_seq = [0]
+
+
+def pay(vm, c, vault_id, payer, amount, relayer=OWNER) -> str:
+    """Simulate the backend relayer attesting a confirmed Base Sepolia
+    deposit: in production this only ever follows reading a real
+    Deposited event off-chain (see backend/src/baseSepolia.js's
+    readConfirmedDeposit); here it's the direct-mode stand-in for that
+    same trust boundary. Returns the payment_id to spend via
+    fund_vault/submit_death_claim/contest_claim."""
+    _payment_seq[0] += 1
+    payment_id = f"pay-{_payment_seq[0]}"
+    vm.sender = relayer
+    vm.value = 0
+    c.record_payment(payment_id, vault_id, hx(payer), amount)
+    return payment_id
 
 
 def make_vault(
@@ -93,14 +111,19 @@ def make_vault(
     vm.sender = grantor
     vm.value = 0
     warp(vm, now_ts)
-    return c.create_vault(
+    vid = c.create_vault(
         hx(beneficiary),
         name,
         json.dumps(akas or ["Janey Public"]),
         birth_year,
         window,
-        deposit,
     )
+    if deposit > 0:
+        payment_id = pay(vm, c, vid, grantor, deposit)
+        vm.sender = grantor
+        vm.value = 0
+        c.fund_vault(vid, payment_id)
+    return vid
 
 
 def verdict(determination, confidence, reasoning="because evidence", summary="source excerpt"):
@@ -122,13 +145,20 @@ def open_claim(vm, c, vault_id, claimant=CLAIMANT, bond=0, now_ts=NOW, image_url
     vm.sender = claimant
     vm.value = 0
     warp(vm, now_ts)
-    return c.submit_death_claim(vault_id, DEATH_URLS, image_url, "I am the executor", bond)
+    payment_id = pay(vm, c, vault_id, claimant, bond) if bond > 0 else ""
+    vm.sender = claimant
+    vm.value = 0
+    return c.submit_death_claim(vault_id, DEATH_URLS, image_url, "I am the executor", payment_id)
 
 
-def contest(vm, c, claim_id, sender=CONTESTER, bond=0, urls=None, image_url="") -> None:
+def contest(vm, c, claim_id, vault_id=None, sender=CONTESTER, bond=0, urls=None, image_url="") -> None:
+    payment_id = ""
+    if bond > 0:
+        assert vault_id is not None, "contest() needs vault_id to mint a payment when bond > 0"
+        payment_id = pay(vm, c, vault_id, sender, bond)
     vm.sender = sender
     vm.value = 0
-    c.contest_claim(claim_id, urls if urls is not None else CONTEST_URLS, image_url, bond)
+    c.contest_claim(claim_id, urls if urls is not None else CONTEST_URLS, image_url, payment_id)
 
 
 # ---------------------------------------------------------------------------
@@ -176,52 +206,57 @@ def test_create_vault_happy_path(vm):
     assert vault["subject_aka"] == ["Janey Public"]
 
 
-def test_create_vault_requires_positive_deposit(vm):
+def test_create_vault_starts_at_zero_balance(vm):
+    """amount_usdc was removed from create_vault entirely — a vault now
+    always starts unfunded and only ever gains balance through
+    fund_vault's payment-bound path (see test_fund_vault_* below)."""
     c = fresh(vm)
     vm.sender = GRANTOR
     vm.value = 0
-    with vm.expect_revert():
-        c.create_vault(hx(BENEFICIARY), "Jane", "[]", 1960, DAY, 0)
+    warp(vm, NOW)
+    vid = c.create_vault(hx(BENEFICIARY), "Jane", "[]", 1960, DAY)
+    assert c.get_vault(vid)["balance_usdc"] == 0
+    assert c.get_vault(vid)["status"] == "ACTIVE"
 
 
 def test_create_vault_rejects_zero_address_beneficiary(vm):
     c = fresh(vm)
     vm.sender = GRANTOR
-    vm.value = GEN
+    vm.value = 0
     with vm.expect_revert():
-        c.create_vault("0x" + "00" * 20, "Jane", "[]", 1960, DAY, GEN)
+        c.create_vault("0x" + "00" * 20, "Jane", "[]", 1960, DAY)
 
 
 def test_create_vault_rejects_self_as_beneficiary(vm):
     c = fresh(vm)
     vm.sender = GRANTOR
-    vm.value = GEN
+    vm.value = 0
     with vm.expect_revert():
-        c.create_vault(hx(GRANTOR), "Jane", "[]", 1960, DAY, GEN)
+        c.create_vault(hx(GRANTOR), "Jane", "[]", 1960, DAY)
 
 
 def test_create_vault_rejects_empty_name(vm):
     c = fresh(vm)
     vm.sender = GRANTOR
-    vm.value = GEN
+    vm.value = 0
     with vm.expect_revert():
-        c.create_vault(hx(BENEFICIARY), "   ", "[]", 1960, DAY, GEN)
+        c.create_vault(hx(BENEFICIARY), "   ", "[]", 1960, DAY)
 
 
 def test_create_vault_rejects_malformed_aka_json(vm):
     c = fresh(vm)
     vm.sender = GRANTOR
-    vm.value = GEN
+    vm.value = 0
     with vm.expect_revert():
-        c.create_vault(hx(BENEFICIARY), "Jane", "not json", 1960, DAY, GEN)
+        c.create_vault(hx(BENEFICIARY), "Jane", "not json", 1960, DAY)
 
 
 def test_create_vault_rejects_too_many_akas(vm):
     c = fresh(vm)
     vm.sender = GRANTOR
-    vm.value = GEN
+    vm.value = 0
     with vm.expect_revert():
-        c.create_vault(hx(BENEFICIARY), "Jane", json.dumps(["a"] * 7), 1960, DAY, GEN)
+        c.create_vault(hx(BENEFICIARY), "Jane", json.dumps(["a"] * 7), 1960, DAY)
 
 
 def test_create_vault_clamps_contest_window(vm):
@@ -239,19 +274,23 @@ def test_create_vault_clamps_contest_window(vm):
 def test_fund_vault_adds_to_balance(vm):
     c = fresh(vm)
     vid = make_vault(vm, c, deposit=5 * GEN)
-    vm.sender = STRANGER  # anyone may top up
+    payment_id = pay(vm, c, vid, STRANGER, 2 * GEN)  # anyone may top up
+    vm.sender = STRANGER
     vm.value = 0
-    c.fund_vault(vid, 2 * GEN)
+    c.fund_vault(vid, payment_id)
     assert c.get_vault(vid)["balance_usdc"] == 7 * GEN
 
 
-def test_fund_vault_rejects_zero_value(vm):
+def test_fund_vault_rejects_unknown_payment_id(vm):
+    """An 'unpaid declaration' — no matching Payment row at all — is
+    rejected outright, whether the payment_id is simply wrong or was
+    never attested by the relayer in the first place."""
     c = fresh(vm)
     vid = make_vault(vm, c)
     vm.sender = STRANGER
     vm.value = 0
     with vm.expect_revert():
-        c.fund_vault(vid, 0)
+        c.fund_vault(vid, "never-recorded")
 
 
 def test_set_beneficiary_only_grantor(vm):
@@ -328,7 +367,7 @@ def test_submit_death_claim_requires_evidence_url(vm):
     vm.sender = CLAIMANT
     vm.value = 0
     with vm.expect_revert():
-        c.submit_death_claim(vid, "[]", "", "note", 0)
+        c.submit_death_claim(vid, "[]", "", "note", "")
 
 
 def test_submit_death_claim_rejects_malformed_json(vm):
@@ -337,16 +376,17 @@ def test_submit_death_claim_rejects_malformed_json(vm):
     vm.sender = CLAIMANT
     vm.value = 0
     with vm.expect_revert():
-        c.submit_death_claim(vid, "not json", "", "note", 0)
+        c.submit_death_claim(vid, "not json", "", "note", "")
 
 
 def test_submit_death_claim_below_minimum_bond_rejected(vm):
     c = fresh(vm, claimant_bond=GEN // 10)
     vid = make_vault(vm, c)
+    payment_id = pay(vm, c, vid, CLAIMANT, GEN // 100)  # below minimum, but a real payment
     vm.sender = CLAIMANT
     vm.value = 0
     with vm.expect_revert():
-        c.submit_death_claim(vid, DEATH_URLS, "", "note", GEN // 100)  # below minimum
+        c.submit_death_claim(vid, DEATH_URLS, "", "note", payment_id)
 
 
 def test_submit_death_claim_blocked_when_vault_not_active(vm):
@@ -362,7 +402,7 @@ def test_submit_death_claim_only_against_existing_vault(vm):
     vm.sender = CLAIMANT
     vm.value = 0
     with vm.expect_revert():
-        c.submit_death_claim(999, DEATH_URLS, "", "note", 0)
+        c.submit_death_claim(999, DEATH_URLS, "", "note", "")
 
 
 # ---------------------------------------------------------------------------
@@ -398,7 +438,7 @@ def test_contest_claim_below_minimum_bond_rejected(vm):
     cid = open_claim(vm, c, vid, now_ts=NOW)
     warp(vm, NOW + HOUR)
     with vm.expect_revert():
-        contest(vm, c, cid, bond=GEN // 100)  # below minimum
+        contest(vm, c, cid, vid, bond=GEN // 100)  # below minimum
 
 
 def test_second_contest_appends_without_erasing_first(vm):
@@ -412,12 +452,12 @@ def test_second_contest_appends_without_erasing_first(vm):
 
     first_urls = json.dumps([archived("https://social.example.com/first-contester-proof")])
     warp(vm, NOW + HOUR)
-    contest(vm, c, cid, sender=CONTESTER, bond=GEN // 100, urls=first_urls)
+    contest(vm, c, cid, vid, sender=CONTESTER, bond=GEN // 100, urls=first_urls)
 
     second_contester = create_address("second_contester")
     second_urls = json.dumps([archived("https://social.example.com/second-contester-proof")])
     warp(vm, NOW + 2 * HOUR)
-    contest(vm, c, cid, sender=second_contester, bond=GEN // 100, urls=second_urls)
+    contest(vm, c, cid, vid, sender=second_contester, bond=GEN // 100, urls=second_urls)
 
     # neither bond is refunded early — both remain staked pending resolution
     assert settled_amount(c, vid, CONTESTER) == 0
@@ -444,11 +484,11 @@ def test_contest_limit_per_claim_enforced(vm):
 
     for i in range(mod.MAX_CONTESTS_PER_CLAIM):
         warp(vm, NOW + HOUR)
-        contest(vm, c, cid, sender=create_address(f"contester_{i}"))
+        contest(vm, c, cid, vid, sender=create_address(f"contester_{i}"))
 
     warp(vm, NOW + HOUR)
     with vm.expect_revert():
-        contest(vm, c, cid, sender=create_address("one_too_many"))
+        contest(vm, c, cid, vid, sender=create_address("one_too_many"))
 
 
 def test_resolve_confirmed_forfeits_every_contesters_bond(vm):
@@ -460,9 +500,9 @@ def test_resolve_confirmed_forfeits_every_contesters_bond(vm):
 
     second_contester = create_address("second_contester")
     warp(vm, NOW + HOUR)
-    contest(vm, c, cid, sender=CONTESTER, bond=GEN // 100)
+    contest(vm, c, cid, vid, sender=CONTESTER, bond=GEN // 100)
     warp(vm, NOW + 2 * HOUR)
-    contest(vm, c, cid, sender=second_contester, bond=GEN // 100)
+    contest(vm, c, cid, vid, sender=second_contester, bond=GEN // 100)
 
     mock_sources(vm)
     vm.mock_llm(r".*", verdict("DECEASED", "HIGH"))
@@ -580,7 +620,7 @@ def test_resolve_confirmed_forfeits_overruled_contester_bond_to_beneficiary(vm):
     vid = make_vault(vm, c, window=DAY, deposit=3 * GEN)
     cid = open_claim(vm, c, vid, now_ts=NOW)
     warp(vm, NOW + HOUR)
-    contest(vm, c, cid, sender=CONTESTER, bond=GEN // 100)
+    contest(vm, c, cid, vid, sender=CONTESTER, bond=GEN // 100)
 
     mock_sources(vm)
     vm.mock_llm(r".*", verdict("DECEASED", "HIGH"))
@@ -620,7 +660,7 @@ def test_resolve_refuted_returns_contester_bond(vm):
     vid = make_vault(vm, c, window=DAY)
     cid = open_claim(vm, c, vid, now_ts=NOW)
     warp(vm, NOW + HOUR)
-    contest(vm, c, cid, sender=CONTESTER, bond=GEN // 100)
+    contest(vm, c, cid, vid, sender=CONTESTER, bond=GEN // 100)
 
     mock_sources(vm)
     vm.mock_llm(r".*", verdict("ALIVE_OR_REFUTED", "HIGH"))
@@ -636,7 +676,7 @@ def test_resolve_inconclusive_returns_both_bonds_and_reopens_vault(vm):
     vid = make_vault(vm, c, window=DAY, deposit=2 * GEN)
     cid = open_claim(vm, c, vid, bond=GEN // 100, now_ts=NOW)
     warp(vm, NOW + HOUR)
-    contest(vm, c, cid, sender=CONTESTER, bond=GEN // 50)
+    contest(vm, c, cid, vid, sender=CONTESTER, bond=GEN // 50)
 
     mock_sources(vm)
     vm.mock_llm(r".*", verdict("INSUFFICIENT", "LOW"))
@@ -878,7 +918,7 @@ def test_pause_blocks_new_vaults_but_not_resolution(vm):
     vm.sender = GRANTOR
     vm.value = 0
     with vm.expect_revert():
-        c.create_vault(hx(BENEFICIARY), "Someone Else", "[]", 1970, DAY, GEN)
+        c.create_vault(hx(BENEFICIARY), "Someone Else", "[]", 1970, DAY)
 
     mock_sources(vm)
     vm.mock_llm(r".*", verdict("DECEASED", "HIGH"))
@@ -934,3 +974,231 @@ def test_platform_stats_track_escrow_totals_across_lifecycle(vm):
     vm.value = 0
     c.cancel_vault(vid)
     assert c.get_platform_stats()["total_escrowed_usdc"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Payment binding — every principal/bond record must trace to a unique,
+# confirmed, correctly-addressed payment. Exercises record_payment /
+# _consume_payment directly, exactly as a caller going around the website
+# and hitting this contract straight would, since there is no other code
+# path for any of these writes.
+# ---------------------------------------------------------------------------
+
+def test_record_payment_only_relayer(vm):
+    c = fresh(vm)
+    vid = make_vault(vm, c, deposit=0)
+    vm.sender = STRANGER  # not the relayer (defaults to OWNER)
+    vm.value = 0
+    with vm.expect_revert():
+        c.record_payment("pay-x", vid, hx(GRANTOR), GEN)
+
+
+def test_record_payment_rejects_duplicate_payment_id(vm):
+    """A duplicate payment record — whether a genuine double-submission or
+    a retried relayer call after a prior success — must never be recorded
+    twice, since that would let the same on-chain deposit back two
+    separate ledger entries."""
+    c = fresh(vm)
+    vid = make_vault(vm, c, deposit=0)
+    vm.sender = OWNER
+    vm.value = 0
+    c.record_payment("dup-1", vid, hx(GRANTOR), GEN)
+    with vm.expect_revert():
+        c.record_payment("dup-1", vid, hx(GRANTOR), GEN)
+
+
+def test_record_payment_rejects_zero_amount(vm):
+    c = fresh(vm)
+    vid = make_vault(vm, c, deposit=0)
+    vm.sender = OWNER
+    vm.value = 0
+    with vm.expect_revert():
+        c.record_payment("pay-zero", vid, hx(GRANTOR), 0)
+
+
+def test_fund_vault_unpaid_declaration_rejected(vm):
+    """No Payment row was ever recorded for this payment_id at all — the
+    core "unpaid declaration" case: a caller (including one calling this
+    contract directly, bypassing the website entirely) cannot conjure a
+    principal out of thin air."""
+    c = fresh(vm)
+    vid = make_vault(vm, c, deposit=0)
+    vm.sender = GRANTOR
+    vm.value = 0
+    with vm.expect_revert():
+        c.fund_vault(vid, "no-such-payment")
+
+
+def test_fund_vault_cannot_reuse_payment_across_two_vaults(vm):
+    """Proves a payment_id is bound to the ONE vault it was recorded for —
+    the same confirmed deposit cannot fund a second, unrelated vault."""
+    c = fresh(vm)
+    vid_a = make_vault(vm, c, deposit=0)
+    vid_b = make_vault(vm, c, deposit=0)
+    payment_id = pay(vm, c, vid_a, GRANTOR, GEN)
+
+    vm.sender = GRANTOR
+    vm.value = 0
+    c.fund_vault(vid_a, payment_id)
+    assert c.get_vault(vid_a)["balance_usdc"] == GEN
+
+    with vm.expect_revert():
+        c.fund_vault(vid_b, payment_id)
+    assert c.get_vault(vid_b)["balance_usdc"] == 0
+
+
+def test_fund_vault_cannot_spend_another_participants_deposit(vm):
+    """A payment recorded for GRANTOR's deposit can never be spent by
+    STRANGER, even though STRANGER can see/guess the payment_id and the
+    correct vault — proving a caller cannot spend another participant's
+    deposit."""
+    c = fresh(vm)
+    vid = make_vault(vm, c, deposit=0)
+    payment_id = pay(vm, c, vid, GRANTOR, GEN)
+
+    vm.sender = STRANGER
+    vm.value = 0
+    with vm.expect_revert():
+        c.fund_vault(vid, payment_id)
+    assert c.get_vault(vid)["balance_usdc"] == 0
+
+    # The rightful payer can still spend it themself.
+    vm.sender = GRANTOR
+    vm.value = 0
+    c.fund_vault(vid, payment_id)
+    assert c.get_vault(vid)["balance_usdc"] == GEN
+
+
+def test_fund_vault_cannot_double_spend_same_payment(vm):
+    """Proves a retry cannot allocate twice: once a payment_id is
+    consumed, a second attempt to spend it — whether a genuine reuse
+    attempt or a naive retry after a transient error — is rejected, and
+    the vault balance reflects the deposit exactly once."""
+    c = fresh(vm)
+    vid = make_vault(vm, c, deposit=0)
+    payment_id = pay(vm, c, vid, GRANTOR, GEN)
+
+    vm.sender = GRANTOR
+    vm.value = 0
+    c.fund_vault(vid, payment_id)
+    assert c.get_vault(vid)["balance_usdc"] == GEN
+
+    with vm.expect_revert():
+        c.fund_vault(vid, payment_id)
+    assert c.get_vault(vid)["balance_usdc"] == GEN  # unchanged — no double allocation
+
+
+def test_submit_death_claim_cannot_reuse_vault_funding_payment_as_bond(vm):
+    """A payment already consumed to fund the vault's principal cannot
+    also be replayed as a claimant's bond — the same confirmed deposit
+    can never back two different ledger entries."""
+    c = fresh(vm)
+    vid = make_vault(vm, c, deposit=GEN)  # consumes payment_id internally
+    claim_payment_id = pay(vm, c, vid, CLAIMANT, GEN // 10)
+    # Sanity: a *fresh* payment works fine as a bond.
+    vm.sender = CLAIMANT
+    vm.value = 0
+    cid = c.submit_death_claim(vid, DEATH_URLS, "", "note", claim_payment_id)
+    assert c.get_claim(cid)["claimant_bond_usdc"] == GEN // 10
+
+    # But trying to reuse it again (e.g. for a contest) fails outright.
+    vm.sender = CONTESTER
+    vm.value = 0
+    with vm.expect_revert():
+        c.contest_claim(cid, CONTEST_URLS, "", claim_payment_id)
+
+
+def test_contest_claim_cannot_spend_another_participants_deposit(vm):
+    c = fresh(vm)
+    vid = make_vault(vm, c, window=DAY)
+    cid = open_claim(vm, c, vid, now_ts=NOW)
+    payment_id = pay(vm, c, vid, CONTESTER, GEN // 10)
+
+    vm.sender = STRANGER  # not CONTESTER
+    vm.value = 0
+    with vm.expect_revert():
+        c.contest_claim(cid, CONTEST_URLS, "", payment_id)
+
+
+def test_set_relayer_only_owner(vm):
+    c = fresh(vm)
+    vm.sender = STRANGER
+    vm.value = 0
+    with vm.expect_revert():
+        c.set_relayer(hx(STRANGER))
+
+
+def test_set_relayer_rotates_who_may_record_payments(vm):
+    c = fresh(vm)
+    new_relayer = create_address("new_relayer")
+    vm.sender = OWNER
+    vm.value = 0
+    c.set_relayer(hx(new_relayer))
+    assert c.get_config()["relayer"].lower() == hx(new_relayer).lower()
+
+    vid = make_vault(vm, c, deposit=0)
+    # OWNER is no longer the relayer — can't attest payments anymore.
+    vm.sender = OWNER
+    vm.value = 0
+    with vm.expect_revert():
+        c.record_payment("pay-y", vid, hx(GRANTOR), GEN)
+    # The new relayer can.
+    payment_id = pay(vm, c, vid, GRANTOR, GEN, relayer=new_relayer)
+    vm.sender = GRANTOR
+    vm.value = 0
+    c.fund_vault(vid, payment_id)
+    assert c.get_vault(vid)["balance_usdc"] == GEN
+
+
+def test_get_payment_reflects_consumption(vm):
+    c = fresh(vm)
+    vid = make_vault(vm, c, deposit=0)
+    payment_id = pay(vm, c, vid, GRANTOR, GEN)
+    assert c.get_payment(payment_id)["consumed"] is False
+    vm.sender = GRANTOR
+    vm.value = 0
+    c.fund_vault(vid, payment_id)
+    assert c.get_payment(payment_id)["consumed"] is True
+
+
+# ---------------------------------------------------------------------------
+# Relay-layer scenario: Base settlement succeeds, then the follow-up
+# GenLayer marking call fails and is retried. This is the GenLayer-side
+# half of that guarantee — mark_settlements_relayed is idempotent
+# bookkeeping (see its docstring) and get_pending_settlements never
+# re-offers an already-relayed row, so a retried relayer sweep can never
+# re-push the same settlement twice from GenLayer's own state. The Base
+# Sepolia half (ObolusEscrow.settledIds rejecting a replayed
+# settlementId) is covered by backend/test/baseSepolia.test.js.
+# ---------------------------------------------------------------------------
+
+def test_mark_settlements_relayed_is_idempotent_after_partial_failure(vm):
+    c = fresh(vm)
+    vid = make_vault(vm, c, window=HOUR, deposit=GEN)
+    cid = open_claim(vm, c, vid, now_ts=NOW)
+    mock_sources(vm)
+    vm.mock_llm(r".*", verdict("DECEASED", "HIGH"))
+    vm.sender = STRANGER
+    vm.value = 0
+    warp(vm, NOW + HOUR)
+    c.resolve_claim(cid)
+
+    pending_before = c.get_pending_settlements(vid)
+    assert len(pending_before) > 0
+    ids = [s["id"] for s in pending_before]
+
+    # Simulates: Base settle() succeeded, but the relayer's follow-up
+    # mark_settlements_relayed call crashed before this ran. A retried
+    # sweep calls get_pending_settlements again — still returns the same
+    # rows — then this succeeds on retry.
+    c.mark_settlements_relayed(json.dumps(ids))
+    assert c.get_pending_settlements(vid) == []
+
+    # A second retry of the same mark call (e.g. a naive at-least-once
+    # relayer) is a harmless no-op, not a second credit of anything —
+    # there is nothing left pending to re-mark, and total_paid_out_usdc
+    # (driven only by resolve_claim's _record_settlement, never by
+    # marking) is unchanged.
+    total_before = c.get_platform_stats()["total_paid_out_usdc"]
+    c.mark_settlements_relayed(json.dumps(ids))
+    assert c.get_platform_stats()["total_paid_out_usdc"] == total_before

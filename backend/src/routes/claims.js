@@ -39,22 +39,25 @@ claimsRouter.get("/:id/resolvable", async (req, res, next) => {
 });
 
 // POST /vaults/:vaultId/claims
-// body: { evidenceUrlsJson, evidenceImageUrl, note, bondUsdc }
-// bondUsdc is a DECLARED figure (base units) — back it with a real deposit
-// on ObolusEscrow via GET /vaults/:vaultId/escrow-fund-calldata first.
-// Mounted directly (not on claimsRouter) in server.js — see there for why
-// requireServiceKey is applied at the mount site instead of here.
+// body: { evidenceUrlsJson, evidenceImageUrl, note, paymentId }
+// paymentId comes from POST /vaults/:vaultId/confirm-payment against a
+// real deposit made via GET /vaults/:vaultId/escrow-fund-calldata — the
+// bond amount is always exactly that attested deposit, never a
+// caller-supplied number. Mounted directly (not on claimsRouter) in
+// server.js — see there for why requireServiceKey is applied at the
+// mount site instead of here.
 export const submitClaim = async (req, res, next) => {
   try {
-    const { evidenceUrlsJson, evidenceImageUrl = "", note = "", bondUsdc = 0 } = req.body;
+    const { evidenceUrlsJson, evidenceImageUrl = "", note = "", paymentId } = req.body;
     if (!evidenceUrlsJson) return res.status(400).json({ error: "evidenceUrlsJson is required (JSON array of URLs)" });
+    if (!paymentId) return res.status(400).json({ error: "paymentId is required (see POST /vaults/:vaultId/confirm-payment)" });
 
     const { txHash, receipt } = await writeMethod("submit_death_claim", [
       Number(req.params.vaultId),
       evidenceUrlsJson,
       evidenceImageUrl,
       note,
-      Number(bondUsdc),
+      paymentId,
     ]);
     await invalidate(`vault:${req.params.vaultId}`);
     await invalidate(`vault_claims:${req.params.vaultId}`);
@@ -64,17 +67,18 @@ export const submitClaim = async (req, res, next) => {
   }
 };
 
-// POST /claims/:id/contest  body: { contestUrlsJson, contestImageUrl, bondUsdc }
+// POST /claims/:id/contest  body: { contestUrlsJson, contestImageUrl, paymentId }
 claimsRouter.post("/:id/contest", requireServiceKey, async (req, res, next) => {
   try {
-    const { contestUrlsJson, contestImageUrl = "", bondUsdc = 0 } = req.body;
+    const { contestUrlsJson, contestImageUrl = "", paymentId } = req.body;
     if (!contestUrlsJson) return res.status(400).json({ error: "contestUrlsJson is required (JSON array of URLs)" });
+    if (!paymentId) return res.status(400).json({ error: "paymentId is required (see POST /vaults/:vaultId/confirm-payment)" });
 
     const result = await writeMethod("contest_claim", [
       Number(req.params.id),
       contestUrlsJson,
       contestImageUrl,
-      Number(bondUsdc),
+      paymentId,
     ]);
     await invalidate(`claim:${req.params.id}`);
     await invalidate(`claim_contests:${req.params.id}`);

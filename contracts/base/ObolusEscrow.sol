@@ -39,13 +39,29 @@ contract ObolusEscrow {
     mapping(bytes32 => mapping(address => uint256)) public claimable; // vaultId => recipient => USDC owed
     mapping(address => uint256) public totalClaimable;               // recipient => USDC owed across ALL vaults
 
+    // Monotonic counter folded into every paymentId so two deposits with
+    // an identical (vaultId, payer, amount) tuple never collide — each
+    // real transfer gets its own unique, never-reused identifier the
+    // GenLayer contract's record_payment/_consume_payment binds a
+    // principal/bond declaration to (see contracts/obolus.py).
+    uint256 public paymentNonce;
+    mapping(bytes32 => bool) public paymentExists; // paymentId => recorded, for cheap existence checks
+
+    // Every settlement batch the relayer pushes must carry a unique
+    // settlementId (derived off-chain from GenLayer's own Settlement.id,
+    // which is never reused). Rejecting a repeat here is what stops a
+    // retried relay call — e.g. a Base settle() that succeeded but whose
+    // follow-up mark_settlements_relayed call on GenLayer then failed —
+    // from allocating the same settlement a second time.
+    mapping(bytes32 => bool) public settledIds; // settlementId => already applied
+
     bool private _locked; // reentrancy guard
 
     // ------------------------------------------------------------------
     // Events
     // ------------------------------------------------------------------
-    event Deposited(bytes32 indexed vaultId, address indexed from, uint256 amount);
-    event Settled(bytes32 indexed vaultId, uint256 recipientCount, uint256 totalAllocated);
+    event Deposited(bytes32 indexed vaultId, address indexed from, uint256 amount, bytes32 paymentId);
+    event Settled(bytes32 indexed vaultId, bytes32 indexed settlementId, uint256 recipientCount, uint256 totalAllocated);
     event Claimed(bytes32 indexed vaultId, address indexed recipient, uint256 amount);
     event RelayerUpdated(address indexed newRelayer);
     event OwnerUpdated(address indexed newOwner);
@@ -87,12 +103,19 @@ contract ObolusEscrow {
     // per-vault pool; GenLayer tracks which portion is which). Caller must
     // have approved this contract for `amount` beforehand.
     // ------------------------------------------------------------------
-    function fundVault(bytes32 vaultId, uint256 amount) external nonReentrant {
+    function fundVault(bytes32 vaultId, uint256 amount) external nonReentrant returns (bytes32 paymentId) {
         require(amount > 0, "ObolusEscrow: amount must be > 0");
         bool ok = usdc.transferFrom(msg.sender, address(this), amount);
         require(ok, "ObolusEscrow: USDC transferFrom failed");
         pools[vaultId].deposited += amount;
-        emit Deposited(vaultId, msg.sender, amount);
+
+        paymentId = keccak256(
+            abi.encodePacked(address(this), vaultId, msg.sender, amount, paymentNonce)
+        );
+        paymentNonce += 1;
+        paymentExists[paymentId] = true;
+
+        emit Deposited(vaultId, msg.sender, amount, paymentId);
     }
 
     // ------------------------------------------------------------------
@@ -105,11 +128,14 @@ contract ObolusEscrow {
     // ------------------------------------------------------------------
     function settle(
         bytes32 vaultId,
+        bytes32 settlementId,
         address[] calldata recipients,
         uint256[] calldata amounts
     ) external onlyRelayer {
         require(recipients.length == amounts.length, "ObolusEscrow: length mismatch");
         require(recipients.length > 0, "ObolusEscrow: no recipients");
+        require(!settledIds[settlementId], "ObolusEscrow: settlementId already applied");
+        settledIds[settlementId] = true;
 
         Pool storage pool = pools[vaultId];
 
@@ -131,7 +157,7 @@ contract ObolusEscrow {
             totalClaimable[recipients[i]] += amounts[i];
         }
 
-        emit Settled(vaultId, recipients.length, total);
+        emit Settled(vaultId, settlementId, recipients.length, total);
     }
 
     // ------------------------------------------------------------------

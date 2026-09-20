@@ -20,7 +20,7 @@ export const api = {
   getVaultsForGrantor: (address) => req(`/vaults/by-grantor/${address}`),
   getVaultsForBeneficiary: (address) => req(`/vaults/by-beneficiary/${address}`),
   createVault: (data) => req("/vaults", { method: "POST", body: JSON.stringify(data) }),
-  fundVault: (id, amountUsdc) => req(`/vaults/${id}/fund`, { method: "POST", body: JSON.stringify({ amountUsdc }) }),
+  fundVault: (id, paymentId) => req(`/vaults/${id}/fund`, { method: "POST", body: JSON.stringify({ paymentId }) }),
   cancelVault: (id) => req(`/vaults/${id}/cancel`, { method: "POST", body: JSON.stringify({}) }),
   setBeneficiary: (id, newBeneficiary) => req(`/vaults/${id}/beneficiary`, { method: "POST", body: JSON.stringify({ newBeneficiary }) }),
 
@@ -29,6 +29,12 @@ export const api = {
   // usdcToUnits() to build it from a human-entered amount.
   getEscrowFundCalldata: (vaultId, amountUnits) =>
     req(`/vaults/${vaultId}/escrow-fund-calldata?amountUnits=${amountUnits}`),
+  // Confirms a caller's own already-mined Base Sepolia deposit tx and
+  // attests it to GenLayer (see backend/src/routes/vaults.js). Returns
+  // { paymentId, amountUsdc, payer } — paymentId is what fund_vault /
+  // submit_death_claim / contest_claim consume on GenLayer next.
+  confirmPayment: (vaultId, txHash) =>
+    req(`/vaults/${vaultId}/confirm-payment`, { method: "POST", body: JSON.stringify({ txHash }) }),
   getEscrowClaimCalldata: (vaultId) => req(`/vaults/${vaultId}/escrow-claim-calldata`),
   getSettlementsForVault: (vaultId) => req(`/vaults/${vaultId}/settlements`),
   relaySettlements: (vaultId) => req(`/vaults/${vaultId}/relay-settlements`, { method: "POST", body: "{}" }),

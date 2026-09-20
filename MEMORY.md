@@ -280,3 +280,46 @@ contract address (current: `0x82a1e87F2Abc790B950fD645E6D7A5aC27F43f91`):
 its internal `_contract_verifiable_decease_escrow` → `_contract_obolus` module-name
 references), and both READMEs was updated to match. The contract's class name
 (`VerifiableDeceaseEscrow`) was left unchanged — only the file/module name moved.
+
+## Payment binding (2026-09-20)
+
+Full detail in [v1-milestone-review.md](v1-milestone-review.md); this entry is the
+*why*, for the record.
+
+**The gap:** the USDC migration above made the GenLayer contract value-free by design —
+every `*_usdc`/`*_bond_usdc` figure was declared caller input, backed (in theory) by a
+separate real deposit on `ObolusEscrow`. Nothing actually checked that the two matched.
+A direct call against the GenLayer contract — skipping the website, and therefore
+skipping the frontend's "deposit first" UI flow entirely — could declare an arbitrary
+principal or bond with zero real USDC behind it. This was flagged as a follow-up review
+finding, not discovered independently; see `v1-milestone-review.md`'s "The ask" for the
+verbatim request.
+
+**Why binding through a relayer attestation, not an on-chain cross-chain read:**
+GenLayer and Base Sepolia are separate chains with no native bridge here — the contract
+can't just "check Base's state" itself mid-call. The existing settlement-relay design
+already trusted the backend's relayer key for one direction (pushing GenLayer's payout
+decisions onto Base); this fix uses the same trust boundary in the other direction
+(attesting Base's deposit confirmations onto GenLayer via `record_payment`), rather than
+introducing a new trust mechanism. The relayer only ever attests what it reads directly
+off a real, already-mined Base Sepolia transaction receipt (`readConfirmedDeposit` in
+`backend/src/baseSepolia.js`) — it never trusts anything the calling client claims.
+
+**Why `create_vault` had to lose its `amount_usdc` param entirely, not just validate
+it:** a payment can only be attested for a vault id that already exists (the Base
+deposit needs a `bytes32` vault key, which is derived from the GenLayer vault id — see
+`vaultIdToBytes32`). That's a chicken-and-egg problem for the very first deposit unless
+vault creation is split from funding. Simplest fix: `create_vault` always starts a vault
+at `balance_usdc = 0`, and the *same* `fund_vault(vault_id, payment_id)` path used for
+top-ups is also used for the initial deposit — no separate "first funding" code path to
+keep in sync.
+
+**Redeploy record:** GenLayer contract → `0x2712daCEa1b839C1b91F168756F71aDa5065497e`
+(superseding `0x396865B47A0311C0254dC7B12c5Ed30683235AcE`); `ObolusEscrow` on Base
+Sepolia → `0x642C8f4De6302D06fC0620efE571dFd69DF94CEA` (superseding
+`0x1f26b190819BFf558e9FeBdC319ea9D9F1Ad6AD6`), deployed with the same throwaway
+deploy/relayer key (`0x7401c129EDfc26E68FE19309fE461eb3Db1058Eb`) already used for the
+GenLayer relayer role — one key, two roles, same trust boundary as before this fix, not
+a new one. Both live at the URLs recorded in "Live deployment" above; `backend/.env`
+and the Fly secrets for `obolus-api` were updated for both addresses in the same
+session, no separate rollout step needed.

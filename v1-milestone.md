@@ -1,5 +1,12 @@
 # V1 Milestone — USDC on Base Sepolia
 
+> **Superseded in part:** the payment-binding fix (September 2026) layers on top of
+> everything below — every `*_usdc` figure described here as "declared" is now bound to
+> a real, relayer-attested Base Sepolia deposit instead of trusted caller input, and the
+> GenLayer contract address in "Live addresses" below is stale. See
+> [v1-milestone-review.md](v1-milestone-review.md) for the full detail and the current
+> live addresses.
+
 This milestone replaces GEN (GenLayer's native token) with real USDC on Base Sepolia as the
 funding, staking, and payout asset across the entire app, and migrates the backend off a
 Fly.io account the team lost access to. GenLayer keeps doing exactly what it's good at —
@@ -177,12 +184,12 @@ Cache safety: `backend/src/cache.js` namespaces every cached read by the current
 configured contract address, so pointing the backend at a new contract makes every prior
 cache entry unreachable immediately — no manual flush was needed on either redeploy.
 
-## Live addresses (as of this milestone)
+## Live addresses (as of this milestone — see note at top of file for the current ones)
 
 | What | Address / URL |
 |---|---|
-| GenLayer contract (StudioNet) | `0x396865B47A0311C0254dC7B12c5Ed30683235AcE` |
-| ObolusEscrow (Base Sepolia) | `0x1f26b190819BFf558e9FeBdC319ea9D9F1Ad6AD6` |
+| GenLayer contract (StudioNet) | `0x396865B47A0311C0254dC7B12c5Ed30683235AcE` (superseded — see [v1-milestone-review.md](v1-milestone-review.md)) |
+| ObolusEscrow (Base Sepolia) | `0x1f26b190819BFf558e9FeBdC319ea9D9F1Ad6AD6` (superseded — see [v1-milestone-review.md](v1-milestone-review.md)) |
 | USDC (Base Sepolia) | `0x036CbD53842c5426634e7929541eC2318f3dCF7e` |
 | Backend API | `https://obolus-api.fly.dev` |
 | Frontend | `https://obolus-app.vercel.app` |

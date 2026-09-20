@@ -2,16 +2,19 @@
  * deployed on Base Sepolia. Kept hand-written and minimal — only the
  * functions/events the backend actually calls. */
 export const OBOLUS_ESCROW_ABI = [
-  "function fundVault(bytes32 vaultId, uint256 amount) external",
-  "function settle(bytes32 vaultId, address[] recipients, uint256[] amounts) external",
+  "function fundVault(bytes32 vaultId, uint256 amount) external returns (bytes32 paymentId)",
+  "function settle(bytes32 vaultId, bytes32 settlementId, address[] recipients, uint256[] amounts) external",
   "function claim(bytes32 vaultId) external",
   "function claimMany(bytes32[] vaultIds) external",
   "function getPool(bytes32 vaultId) external view returns (uint256 deposited, uint256 allocated)",
   "function getClaimable(bytes32 vaultId, address recipient) external view returns (uint256)",
   "function totalClaimable(address recipient) external view returns (uint256)",
+  "function paymentExists(bytes32 paymentId) external view returns (bool)",
+  "function settledIds(bytes32 settlementId) external view returns (bool)",
   "function relayer() external view returns (address)",
   "function owner() external view returns (address)",
-  "event Settled(bytes32 indexed vaultId, uint256 recipientCount, uint256 totalAllocated)",
+  "event Deposited(bytes32 indexed vaultId, address indexed from, uint256 amount, bytes32 paymentId)",
+  "event Settled(bytes32 indexed vaultId, bytes32 indexed settlementId, uint256 recipientCount, uint256 totalAllocated)",
   "event Claimed(bytes32 indexed vaultId, address indexed recipient, uint256 amount)",
 ];
 

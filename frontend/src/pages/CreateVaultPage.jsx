@@ -56,14 +56,20 @@ export default function CreateVaultPage() {
         JSON.stringify(akas),
         birthYear ? Number(birthYear) : 0,
         Math.round(Number(windowDays) * 86400),
-        Number(amountUnits),
       ]);
       const vaultId = receipt?.resultValue;
       if (!vaultId) throw new Error("Vault created but no vault id was returned — check /dashboard.");
 
       setStep("Depositing USDC on Base Sepolia (approve, then deposit)…");
       const { steps } = await api.getEscrowFundCalldata(vaultId, amountUnits.toString());
-      await sendBaseSepoliaSteps(address, steps);
+      const hashes = await sendBaseSepoliaSteps(address, steps);
+      const fundTxHash = hashes[hashes.length - 1]; // the fundVault step, after approve
+
+      setStep("Confirming your deposit…");
+      const { paymentId } = await api.confirmPayment(vaultId, fundTxHash);
+
+      setStep("Crediting the vault on GenLayer…");
+      await write(glClient, "fund_vault", [vaultId, paymentId]);
 
       navigate(`/vaults/${vaultId}`);
     } catch (err) {

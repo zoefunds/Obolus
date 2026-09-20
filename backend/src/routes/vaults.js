@@ -2,7 +2,13 @@ import { Router } from "express";
 import { readMethod, writeMethod } from "../contract.js";
 import { cached, invalidate } from "../cache.js";
 import { requireServiceKey } from "../auth.js";
-import { buildFundCalldata, buildClaimCalldata, relaySettlementsToEscrow, isEscrowConfigured } from "../baseSepolia.js";
+import {
+  buildFundCalldata,
+  buildClaimCalldata,
+  relaySettlementsToEscrow,
+  readConfirmedDeposit,
+  isEscrowConfigured,
+} from "../baseSepolia.js";
 
 export const vaultsRouter = Router();
 
@@ -37,11 +43,10 @@ vaultsRouter.get("/:id/claims", async (req, res, next) => {
 });
 
 // POST /vaults
-// body: { beneficiary, subjectName, subjectAkaJson, subjectBirthYear, contestWindowSeconds, amountUsdc }
-// amountUsdc is a DECLARED figure (base units, 6 decimals) — the caller
-// must separately deposit the matching real USDC into ObolusEscrow on Base
-// Sepolia via GET /vaults/:id/escrow-fund-calldata (once the vault id is
-// known) before/alongside this call. See README.md §7 and MEMORY.md.
+// body: { beneficiary, subjectName, subjectAkaJson, subjectBirthYear, contestWindowSeconds }
+// Metadata only — the vault is created with a zero balance. Fund it
+// afterwards via POST /vaults/:id/confirm-payment + POST /vaults/:id/fund
+// (see README.md §7); create_vault no longer accepts a declared amount.
 vaultsRouter.post("/", requireServiceKey, async (req, res, next) => {
   try {
     const {
@@ -50,11 +55,10 @@ vaultsRouter.post("/", requireServiceKey, async (req, res, next) => {
       subjectAkaJson = "[]",
       subjectBirthYear = 0,
       contestWindowSeconds,
-      amountUsdc,
     } = req.body;
 
-    if (!beneficiary || !subjectName || !contestWindowSeconds || !amountUsdc) {
-      return res.status(400).json({ error: "beneficiary, subjectName, contestWindowSeconds, amountUsdc are required" });
+    if (!beneficiary || !subjectName || !contestWindowSeconds) {
+      return res.status(400).json({ error: "beneficiary, subjectName, contestWindowSeconds are required" });
     }
 
     const { txHash, receipt } = await writeMethod("create_vault", [
@@ -63,7 +67,6 @@ vaultsRouter.post("/", requireServiceKey, async (req, res, next) => {
       subjectAkaJson,
       Number(subjectBirthYear),
       Number(contestWindowSeconds),
-      Number(amountUsdc),
     ]);
     await invalidate("vault_count");
     res.status(201).json({ txHash, receipt });
@@ -72,12 +75,46 @@ vaultsRouter.post("/", requireServiceKey, async (req, res, next) => {
   }
 });
 
-// POST /vaults/:id/fund  body: { amountUsdc }
+// POST /vaults/:id/confirm-payment  body: { txHash }
+// Deliberately permissionless, like /relay-settlements: it never trusts
+// anything the caller claims, only what readConfirmedDeposit decodes
+// straight off the real, already-mined Base Sepolia receipt, and
+// GenLayer's own record_payment is separately gated to the relayer
+// address this backend signs with — so there is nothing to gain by
+// calling this early, on someone else's tx, or repeatedly. Returns the
+// payment_id to pass to fund_vault / submit_death_claim / contest_claim.
+// Safe to call repeatedly with the same txHash: GenLayer's record_payment
+// rejects a duplicate payment_id outright, so a retry here is a harmless
+// no-op once the first call already attested it.
+vaultsRouter.post("/:id/confirm-payment", async (req, res, next) => {
+  try {
+    if (!isEscrowConfigured()) {
+      return res.status(503).json({ error: "Escrow relayer is not configured on this server" });
+    }
+    const { txHash } = req.body;
+    if (!txHash) return res.status(400).json({ error: "txHash is required" });
+    const vaultId = Number(req.params.id);
+
+    const deposit = await readConfirmedDeposit(vaultId, txHash);
+    try {
+      await writeMethod("record_payment", [deposit.paymentId, vaultId, deposit.payer, Number(deposit.amount)]);
+    } catch (err) {
+      // Already recorded (e.g. a retried confirm-payment call) is fine —
+      // the payment_id is still usable exactly once by fund_vault et al.
+      if (!/already recorded/i.test(String(err?.message || ""))) throw err;
+    }
+    res.json({ paymentId: deposit.paymentId, amountUsdc: deposit.amount, payer: deposit.payer });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /vaults/:id/fund  body: { paymentId }
 vaultsRouter.post("/:id/fund", requireServiceKey, async (req, res, next) => {
   try {
-    const { amountUsdc } = req.body;
-    if (!amountUsdc) return res.status(400).json({ error: "amountUsdc is required" });
-    const result = await writeMethod("fund_vault", [Number(req.params.id), Number(amountUsdc)]);
+    const { paymentId } = req.body;
+    if (!paymentId) return res.status(400).json({ error: "paymentId is required (see POST /vaults/:id/confirm-payment)" });
+    const result = await writeMethod("fund_vault", [Number(req.params.id), paymentId]);
     await invalidate(`vault:${req.params.id}`);
     res.json(result);
   } catch (err) {

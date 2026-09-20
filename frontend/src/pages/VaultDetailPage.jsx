@@ -65,11 +65,16 @@ function GrantorControls({ vault, address, glClient, onChanged }) {
     setError("");
     try {
       const amountUnits = usdcToUnits(amount);
-      setStep("Declaring top-up on GenLayer…");
-      await write(glClient, "fund_vault", [vault.id, Number(amountUnits)]);
       setStep("Depositing USDC on Base Sepolia…");
       const { steps } = await api.getEscrowFundCalldata(vault.id, amountUnits.toString());
-      await sendBaseSepoliaSteps(address, steps);
+      const hashes = await sendBaseSepoliaSteps(address, steps);
+      const fundTxHash = hashes[hashes.length - 1];
+
+      setStep("Confirming your deposit…");
+      const { paymentId } = await api.confirmPayment(vault.id, fundTxHash);
+
+      setStep("Crediting the top-up on GenLayer…");
+      await write(glClient, "fund_vault", [vault.id, paymentId]);
       setMode(null);
       setAmount("");
       onChanged();
@@ -183,13 +188,20 @@ function ContestForm({ claimId, vaultId, address, glClient, onSubmitted }) {
         .map((u) => u.trim())
         .filter(Boolean);
       const bondUnits = usdcToUnits(bondUsdc);
-      setStep("Declaring contest on GenLayer…");
-      await write(glClient, "contest_claim", [claimId, JSON.stringify(urlList), imageUrl, Number(bondUnits)]);
+
+      let paymentId = "";
       if (bondUnits > 0n) {
         setStep("Depositing bond on Base Sepolia…");
         const { steps } = await api.getEscrowFundCalldata(vaultId, bondUnits.toString());
-        await sendBaseSepoliaSteps(address, steps);
+        const hashes = await sendBaseSepoliaSteps(address, steps);
+        const fundTxHash = hashes[hashes.length - 1];
+
+        setStep("Confirming your deposit…");
+        ({ paymentId } = await api.confirmPayment(vaultId, fundTxHash));
       }
+
+      setStep("Declaring contest on GenLayer…");
+      await write(glClient, "contest_claim", [claimId, JSON.stringify(urlList), imageUrl, paymentId]);
       onSubmitted();
     } catch (err) {
       setError(err.message);

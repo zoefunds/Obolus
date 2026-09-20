@@ -409,6 +409,33 @@ class Contest:
 
 @allow_storage
 @dataclass
+class Payment:
+    """One confirmed USDC deposit into ObolusEscrow on Base Sepolia,
+    attested here by the trusted backend relayer after it reads the real
+    on-chain Deposited event/receipt for that specific transaction — never
+    from a bare caller-supplied number. `id` is the escrow contract's own
+    unique identifier for that one deposit (see ObolusEscrow.fundVault),
+    never reused for a second deposit.
+
+    A Payment backs exactly one principal/bond declaration: `consumed`
+    flips to True the instant it is spent by create/fund/claim/contest
+    (see _consume_payment), so the same confirmed deposit can never fund
+    two different ledger entries, and a declaration with no matching,
+    unconsumed Payment row is rejected outright — whether the caller is
+    the website's own backend or an arbitrary direct call to this
+    contract. This is the binding the value-free design described below
+    was missing: previously any caller could declare an arbitrary
+    amount_usdc/bond_usdc with no real deposit behind it at all."""
+    id: str
+    vault_id: u32           # which vault's escrow pool the deposit landed in
+    payer: Address           # who actually sent the USDC on Base
+    amount_usdc: u256
+    consumed: bool
+    recorded_ts: u64
+
+
+@allow_storage
+@dataclass
 class Settlement:
     """One pending (or already-relayed) USDC payment instruction produced
     by a resolve_claim verdict or a cancel_vault refund. This contract
@@ -435,10 +462,13 @@ class Settlement:
 #  validator consensus to reason about, while the real USDC custody and
 #  transfer happens on Base Sepolia's ObolusEscrow contract. See the
 #  Settlement dataclass above and _record_settlement below for the payout
-#  half of that split; the funding half is the amount_usdc/bond_usdc
-#  parameters on create_vault/fund_vault/submit_death_claim/contest_claim,
-#  which the caller must back with a real matching deposit on
-#  ObolusEscrow.fundVault before (or alongside) calling here.
+#  half of that split. The funding half — fund_vault/submit_death_claim/
+#  contest_claim — no longer trusts a caller-declared amount at all: the
+#  caller must first deposit real USDC via ObolusEscrow.fundVault, then
+#  pass the payment_id the backend relayer attested for that specific
+#  deposit (see record_payment, the Payment dataclass, and
+#  _consume_payment), which binds the exact attested amount to exactly
+#  one vault and one participant, exactly once.
 # ============================================================================
 
 
@@ -474,6 +504,17 @@ class VerifiableDeceaseEscrow(gl.Contract):
     paused: bool
     min_claimant_bond_usdc: u256
     min_contester_bond_usdc: u256
+    # Trusted backend service allowed to attest confirmed Base Sepolia
+    # deposits via record_payment — see the Payment dataclass and
+    # _consume_payment below. Not the same trust boundary as owner: the
+    # relayer can only ever record deposits it actually observed on
+    # Base, never move or fabricate ledger balances itself.
+    relayer: Address
+
+    # ---- payment storage — every confirmed Base Sepolia deposit the
+    # relayer has attested to, keyed by ObolusEscrow's own unique payment
+    # id. See the Payment dataclass and _consume_payment. -------------------
+    payments: TreeMap[str, Payment]
 
     # ---- vault storage --------------------------------------------------------
     vault_count: u64
@@ -509,7 +550,12 @@ class VerifiableDeceaseEscrow(gl.Contract):
     #  Construction
     # ------------------------------------------------------------------------
 
-    def __init__(self, min_claimant_bond_usdc: int = 0, min_contester_bond_usdc: int = 0):
+    def __init__(
+        self,
+        min_claimant_bond_usdc: int = 0,
+        min_contester_bond_usdc: int = 0,
+        relayer_address: str = "",
+    ):
         """Deploy the platform.
 
         Args:
@@ -519,11 +565,16 @@ class VerifiableDeceaseEscrow(gl.Contract):
             min_contester_bond_usdc: minimum USDC (base units) a contester
                 must declare when submitting contest evidence. 0 disables
                 it.
+            relayer_address: hex address of the backend service trusted to
+                attest confirmed Base Sepolia deposits via record_payment.
+                Defaults to the deploying owner when omitted; change later
+                with set_relayer.
         """
         self.owner = gl.message.sender_address
         self.paused = False
         self.min_claimant_bond_usdc = u256(max(0, int(min_claimant_bond_usdc)))
         self.min_contester_bond_usdc = u256(max(0, int(min_contester_bond_usdc)))
+        self.relayer = _coerce_address(relayer_address) if relayer_address else self.owner
         self.vault_count = u64(0)
         self.claim_count = u64(0)
         self.contest_count = u64(0)
@@ -545,6 +596,40 @@ class VerifiableDeceaseEscrow(gl.Contract):
     def _only_owner(self) -> None:
         if gl.message.sender_address != self.owner:
             raise gl.vm.UserError(ERR_EXPECTED + "only the owner may call this")
+
+    def _only_relayer(self) -> None:
+        if gl.message.sender_address != self.relayer:
+            raise gl.vm.UserError(ERR_EXPECTED + "only the authorized relayer may call this")
+
+    def _consume_payment(self, payment_id: str, expected_vault_id: int, expected_payer: Address) -> int:
+        """Spend a previously-attested, unconsumed Payment — the single
+        choke point every principal/bond declaration must pass through
+        (create/fund_vault, submit_death_claim, contest_claim). Enforces,
+        atomically, in one write:
+          - the payment was actually confirmed by the relayer — an
+            "unpaid" declaration with no matching Payment row is rejected
+            here, never trusted from caller-supplied calldata;
+          - it has never been spent before — a retried call, or a second
+            declaration reusing the same payment_id, cannot allocate
+            twice from one confirmed deposit;
+          - it was deposited for THIS vault's escrow pool, not some other
+            vault's;
+          - it was deposited by the caller themself — a caller can never
+            spend another participant's deposit, even one they can
+            observe the payment_id of.
+        Applies identically to a call routed through the website and one
+        made directly against this contract — there is no path that
+        bypasses it.
+        """
+        pid = str(payment_id).strip()
+        _require(len(pid) > 0, "payment_id must not be empty")
+        payment = self.payments.get(pid)
+        _require(payment is not None, "no confirmed payment found for this payment_id — declaration is unpaid")
+        _require(not bool(payment.consumed), "payment_id has already been spent")
+        _require(int(payment.vault_id) == int(expected_vault_id), "payment was not deposited for this vault")
+        _require(payment.payer == expected_payer, "payment was deposited by a different participant")
+        payment.consumed = True
+        return int(payment.amount_usdc)
 
     def _get_vault(self, vault_id: int) -> Vault:
         vid = u32(vault_id)
@@ -692,6 +777,16 @@ class VerifiableDeceaseEscrow(gl.Contract):
             "submitted_ts": int(contest.submitted_ts),
         }
 
+    def _payment_dict(self, payment: Payment) -> dict:
+        return {
+            "id": payment.id,
+            "vault_id": int(payment.vault_id),
+            "payer": payment.payer.as_hex,
+            "amount_usdc": int(payment.amount_usdc),
+            "consumed": bool(payment.consumed),
+            "recorded_ts": int(payment.recorded_ts),
+        }
+
     def _settlement_dict(self, settlement: Settlement) -> dict:
         return {
             "id": int(settlement.id),
@@ -714,15 +809,20 @@ class VerifiableDeceaseEscrow(gl.Contract):
         subject_aka_json: str,
         subject_birth_year: int,
         contest_window_seconds: int,
-        amount_usdc: int,
     ) -> int:
-        """Create a decease-escrow vault, declaring the USDC (base units,
-        6 decimals) to be inherited. This call is value-free — it only
-        records the declaration; the caller must separately deposit the
-        matching real USDC into ObolusEscrow.fundVault(vaultId, amount) on
-        Base Sepolia (see README.md §7). The backend's
+        """Create a decease-escrow vault. This call is metadata-only and
+        never moves the ledger — it starts the vault at balance_usdc=0,
+        ACTIVE and open for funding. The caller must separately deposit
+        real USDC into ObolusEscrow.fundVault(vaultId, amount) on Base
+        Sepolia (see README.md §7) — the backend's
         GET /vaults/:id/escrow-fund-calldata (or an equivalent direct call)
-        returns the approve + fundVault calldata for the connected wallet.
+        returns the approve + fundVault calldata for the connected wallet
+        — and then call fund_vault(vaultId, payment_id) here with the
+        payment_id the relayer attested for that specific deposit (see
+        the Payment dataclass and _consume_payment). Declaring an amount
+        directly here was removed: it let any caller — including a direct
+        contract call bypassing the website — declare an arbitrary
+        principal backed by no real deposit at all.
 
         Args:
             beneficiary: hex address to receive funds on a confirmed verdict.
@@ -734,17 +834,13 @@ class VerifiableDeceaseEscrow(gl.Contract):
             contest_window_seconds: how long a submitted claim stays
                 contestable before resolution may run. Bounded to
                 [MIN_CONTEST_WINDOW_SECONDS, MAX_CONTEST_WINDOW_SECONDS].
-            amount_usdc: declared USDC (base units) being escrowed — must
-                match a real deposit on ObolusEscrow for this vault id.
 
         Returns: the new vault id.
         """
         self._not_paused()
         sender = gl.message.sender_address
-        deposit = int(amount_usdc)
         now_ts = _chain_now_ts()
 
-        _require(deposit > 0, "vault must be funded with a positive USDC amount")
         beneficiary_addr = _coerce_address(beneficiary)
         _require(not _is_zero_address(beneficiary_addr), "beneficiary must not be the zero address")
         _require(beneficiary_addr != sender, "beneficiary must differ from the grantor")
@@ -778,7 +874,7 @@ class VerifiableDeceaseEscrow(gl.Contract):
             subject_name=subject_name.strip(),
             subject_aka_json=json.dumps(clean_akas),
             subject_birth_year=u32(max(0, int(subject_birth_year))),
-            balance_usdc=u256(deposit),
+            balance_usdc=u256(0),
             status=u8(VAULT_ACTIVE),
             contest_window_seconds=u32(window),
             confidence_floor_note="verdict must be HIGH confidence to flip a terminal state",
@@ -787,22 +883,27 @@ class VerifiableDeceaseEscrow(gl.Contract):
             claim_count=u32(0),
             active_claim_id=u32(0),
         )
-        self.total_escrowed_usdc = u256(int(self.total_escrowed_usdc) + deposit)
         self._record_grantor_vault(sender, vault_id)
         self._record_beneficiary_vault(beneficiary_addr, vault_id)
         return vault_id
 
     @gl.public.write
-    def fund_vault(self, vault_id: int, amount_usdc: int) -> None:
-        """Declare more USDC added to an existing ACTIVE vault. Anyone may
-        top up a vault (e.g. co-grantors), not only the original grantor —
-        but the caller must separately deposit the matching real USDC into
-        ObolusEscrow.fundVault(vaultId, amount) on Base Sepolia."""
+    def fund_vault(self, vault_id: int, payment_id: str) -> None:
+        """Credit an existing ACTIVE vault with a real, relayer-confirmed
+        USDC deposit. Anyone may top up a vault (e.g. co-grantors), not
+        only the original grantor — but they must first deposit real USDC
+        into ObolusEscrow.fundVault(vaultId, amount) on Base Sepolia and
+        get back the payment_id the relayer attested for that specific
+        deposit (see record_payment / the Payment dataclass). The credited
+        amount is always exactly the attested deposit amount — never a
+        caller-supplied number — and a payment_id can only ever fund the
+        one vault it was deposited for, from the one participant who sent
+        it, exactly once."""
         self._not_paused()
         vault = self._get_vault(vault_id)
         _require(int(vault.status) == VAULT_ACTIVE, "vault is not open for funding")
-        amount = int(amount_usdc)
-        _require(amount > 0, "fund amount must be a positive USDC amount")
+        sender = gl.message.sender_address
+        amount = self._consume_payment(payment_id, vault_id, sender)
         vault.balance_usdc = u256(int(vault.balance_usdc) + amount)
         self.total_escrowed_usdc = u256(int(self.total_escrowed_usdc) + amount)
 
@@ -856,16 +957,17 @@ class VerifiableDeceaseEscrow(gl.Contract):
         evidence_urls_json: str,
         evidence_image_url: str,
         note: str,
-        bond_usdc: int,
+        payment_id: str,
     ) -> int:
         """Open a death claim against an ACTIVE vault. Anyone may submit —
         resolution is permissionless and evidence-driven, not identity-
-        gated. Declare at least min_claimant_bond_usdc as a good-faith
-        bond and separately deposit the matching real USDC into
-        ObolusEscrow.fundVault(vaultId, bond) on Base Sepolia; it is
-        released back to the claimant if the claim resolves CONFIRMED or
-        INCONCLUSIVE, and forfeited into the vault's own balance if the
-        claim is REFUTED.
+        gated. Back the claim with a good-faith bond by first depositing
+        real USDC into ObolusEscrow.fundVault(vaultId, bond) on Base
+        Sepolia, then pass the payment_id the relayer attested for that
+        deposit — the bond amount is always exactly that attested deposit,
+        never a caller-supplied number. It is released back to the
+        claimant if the claim resolves CONFIRMED or INCONCLUSIVE, and
+        forfeited into the vault's own balance if the claim is REFUTED.
 
         Args:
             vault_id: target vault.
@@ -878,7 +980,8 @@ class VerifiableDeceaseEscrow(gl.Contract):
                 to a page/photo showing a certificate or obituary, rendered
                 as a screenshot during resolution. "" for none.
             note: free-text context, e.g. relationship to the subject.
-            bond_usdc: declared USDC (base units) bond backing this claim.
+            payment_id: relayer-attested id of the confirmed Base Sepolia
+                deposit backing this claim's bond (see record_payment).
 
         Returns: the new claim id.
         """
@@ -886,8 +989,15 @@ class VerifiableDeceaseEscrow(gl.Contract):
         vault = self._get_vault(vault_id)
         _require(int(vault.status) == VAULT_ACTIVE, "vault does not have an open funding state for a new claim")
         now_ts = _chain_now_ts()
+        sender = gl.message.sender_address
 
-        bond = int(bond_usdc)
+        # An empty payment_id declares a zero bond outright — no real
+        # transfer is needed to back "no bond" — rather than routing
+        # through _consume_payment, which only ever spends a genuine,
+        # already-confirmed deposit. Any *nonzero* bond, by contrast, has
+        # no path here except through a real, relayer-attested payment.
+        pid = str(payment_id).strip() if payment_id else ""
+        bond = self._consume_payment(pid, vault_id, sender) if pid else 0
         _require(bond >= int(self.min_claimant_bond_usdc), "claimant bond below minimum")
 
         urls = _parse_urls_json(evidence_urls_json, "evidence_urls_json", MAX_EVIDENCE_URLS)
@@ -900,7 +1010,6 @@ class VerifiableDeceaseEscrow(gl.Contract):
         claim_id = int(self.claim_count) + 1
         self.claim_count = u64(claim_id)
         cid = u32(claim_id)
-        sender = gl.message.sender_address
 
         self.claims[cid] = Claim(
             id=cid,
@@ -933,7 +1042,7 @@ class VerifiableDeceaseEscrow(gl.Contract):
         claim_id: int,
         contest_urls_json: str,
         contest_image_url: str,
-        bond_usdc: int,
+        payment_id: str,
     ) -> None:
         """Submit counter-evidence against an OPEN claim before its contest
         deadline — e.g. a fresh, dated public appearance, or a "proof of
@@ -945,13 +1054,14 @@ class VerifiableDeceaseEscrow(gl.Contract):
         a co-heir or acquaintance may have evidence the grantor cannot
         submit themself (including the case where the grantor's own keys
         are the ones actually lost, which is exactly the ambiguity this
-        contract exists to resolve rather than assume). Declare at least
-        min_contester_bond_usdc and separately deposit the matching real
-        USDC into ObolusEscrow.fundVault(vaultId, bond) on Base Sepolia;
-        it is released back to the contester if the claim ultimately
-        resolves REFUTED or INCONCLUSIVE, and forfeited into the vault (via
-        the beneficiary payout) if the claim resolves CONFIRMED despite
-        the contest.
+        contract exists to resolve rather than assume). Back the contest
+        with a bond by first depositing real USDC into
+        ObolusEscrow.fundVault(vaultId, bond) on Base Sepolia, then pass
+        the payment_id the relayer attested for that deposit — the bond
+        amount is always exactly that attested deposit. It is released
+        back to the contester if the claim ultimately resolves REFUTED or
+        INCONCLUSIVE, and forfeited into the vault (via the beneficiary
+        payout) if the claim resolves CONFIRMED despite the contest.
 
         Append-only: every contest submitted before the window closes is
         stored as its own row (up to MAX_CONTESTS_PER_CLAIM) and every one
@@ -969,7 +1079,9 @@ class VerifiableDeceaseEscrow(gl.Contract):
         _require(now_ts <= int(claim.contest_deadline_ts), "contest window has closed")
         _require(int(claim.contest_count) < MAX_CONTESTS_PER_CLAIM, "this claim has reached its contest limit")
 
-        bond = int(bond_usdc)
+        sender = gl.message.sender_address
+        pid = str(payment_id).strip() if payment_id else ""
+        bond = self._consume_payment(pid, int(claim.vault_id), sender) if pid else 0
         _require(bond >= int(self.min_contester_bond_usdc), "contester bond below minimum")
 
         urls = _parse_urls_json(contest_urls_json, "contest_urls_json", MAX_CONTEST_URLS)
@@ -981,7 +1093,6 @@ class VerifiableDeceaseEscrow(gl.Contract):
         contest_id = int(self.contest_count) + 1
         self.contest_count = u64(contest_id)
         cxid = u32(contest_id)
-        sender = gl.message.sender_address
 
         self.contests[cxid] = Contest(
             id=cxid,
@@ -1398,6 +1509,45 @@ Respond with ONLY a JSON object, no markdown, with exactly these keys:
         return self._claim_dict(claim)
 
     # ========================================================================
+    #  PUBLIC WRITE — payment attestation (relayer-only; binds every
+    #  principal/bond declaration to a real, unique confirmed deposit)
+    # ========================================================================
+
+    @gl.public.write
+    def record_payment(self, payment_id: str, vault_id: int, payer: str, amount_usdc: int) -> None:
+        """Relayer-only: attest that a specific, already-confirmed USDC
+        deposit landed on ObolusEscrow (Base Sepolia) for `vault_id`, from
+        `payer`, for `amount_usdc`. The relayer calls this only after
+        reading the real on-chain Deposited event/receipt for that exact
+        transaction — this contract never trusts a bare caller-supplied
+        amount for anything that touches the ledger.
+
+        payment_id is ObolusEscrow's own unique identifier for that one
+        deposit (see ObolusEscrow.fundVault), never reused for a second
+        deposit. Recording the same payment_id twice — whether a genuine
+        duplicate payment record or a retried relayer call after a prior
+        success — is rejected outright rather than silently overwritten or
+        double-credited, since a Payment row, once created, is immutable
+        except for the one-way consumed flip in _consume_payment.
+        """
+        self._only_relayer()
+        pid = str(payment_id).strip()
+        _require(len(pid) > 0, "payment_id must not be empty")
+        _require(self.payments.get(pid) is None, "payment_id already recorded — duplicate payment record")
+        amount = int(amount_usdc)
+        _require(amount > 0, "recorded payment amount must be positive")
+        payer_addr = _coerce_address(payer)
+        _require(not _is_zero_address(payer_addr), "payer must not be the zero address")
+        self.payments[pid] = Payment(
+            id=pid,
+            vault_id=u32(vault_id),
+            payer=payer_addr,
+            amount_usdc=u256(amount),
+            consumed=False,
+            recorded_ts=u64(_chain_now_ts()),
+        )
+
+    # ========================================================================
     #  PUBLIC WRITE — settlement relay bookkeeping (no value moves here)
     # ========================================================================
 
@@ -1453,6 +1603,17 @@ Respond with ONLY a JSON object, no markdown, with exactly these keys:
         new_addr = _coerce_address(new_owner)
         _require(not _is_zero_address(new_addr), "owner must not be the zero address")
         self.owner = new_addr
+
+    @gl.public.write
+    def set_relayer(self, new_relayer: str) -> None:
+        """Owner only: rotate the backend service trusted to attest
+        confirmed Base Sepolia deposits via record_payment. A change here
+        never touches previously-recorded Payment rows or already-issued
+        Settlement records — only who may attest new ones going forward."""
+        self._only_owner()
+        new_addr = _coerce_address(new_relayer)
+        _require(not _is_zero_address(new_addr), "relayer must not be the zero address")
+        self.relayer = new_addr
 
     # ========================================================================
     #  PUBLIC VIEWS
@@ -1522,6 +1683,17 @@ Respond with ONLY a JSON object, no markdown, with exactly these keys:
         ]
 
     @gl.public.view
+    def get_payment(self, payment_id: str) -> dict:
+        """Look up a relayer-attested Payment by id — "" fields / a 404-ish
+        empty dict convention isn't used; callers should check existence
+        via get_pending_settlements-style list endpoints or handle a
+        thrown error, matching the other _get_* accessors' pattern."""
+        payment = self.payments.get(str(payment_id).strip())
+        if payment is None:
+            raise gl.vm.UserError(ERR_EXPECTED + "no payment recorded for this payment_id")
+        return self._payment_dict(payment)
+
+    @gl.public.view
     def is_resolvable(self, claim_id: int) -> bool:
         """Cheap deterministic pre-check a caller can run before spending
         gas on the expensive nondet resolve_claim round: is this claim even
@@ -1549,6 +1721,7 @@ Respond with ONLY a JSON object, no markdown, with exactly these keys:
     def get_config(self) -> dict:
         return {
             "owner": self.owner.as_hex,
+            "relayer": self.relayer.as_hex,
             "paused": bool(self.paused),
             "min_claimant_bond_usdc": int(self.min_claimant_bond_usdc),
             "min_contester_bond_usdc": int(self.min_contester_bond_usdc),

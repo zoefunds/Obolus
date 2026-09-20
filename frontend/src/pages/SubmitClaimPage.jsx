@@ -34,21 +34,27 @@ export default function SubmitClaimPage() {
         .map((u) => u.trim())
         .filter(Boolean);
       const bondUnits = usdcToUnits(bondUsdc);
+
+      let paymentId = "";
+      if (bondUnits > 0n) {
+        setStep("Depositing bond on Base Sepolia (approve, then deposit)…");
+        const { steps } = await api.getEscrowFundCalldata(id, bondUnits.toString());
+        const hashes = await sendBaseSepoliaSteps(address, steps);
+        const fundTxHash = hashes[hashes.length - 1];
+
+        setStep("Confirming your deposit…");
+        ({ paymentId } = await api.confirmPayment(id, fundTxHash));
+      }
+
       setStep("Declaring claim on GenLayer…");
       const receipt = await write(glClient, "submit_death_claim", [
         Number(id),
         JSON.stringify(urlList),
         imageUrl,
         note,
-        Number(bondUnits),
+        paymentId,
       ]);
       const claimId = receipt?.resultValue;
-
-      if (bondUnits > 0n) {
-        setStep("Depositing bond on Base Sepolia (approve, then deposit)…");
-        const { steps } = await api.getEscrowFundCalldata(id, bondUnits.toString());
-        await sendBaseSepoliaSteps(address, steps);
-      }
 
       navigate(claimId ? `/claims/${claimId}` : `/vaults/${id}`);
     } catch (err) {

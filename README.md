@@ -1,6 +1,6 @@
 # Obolus
 
-**Obolus** is an inheritance escrow that only releases GEN when the truth has been
+**Obolus** is an inheritance escrow that only releases USDC when the truth has been
 established — not when a timer runs out, not when one person says so, but when
 GenLayer's validator network independently reads real, fetched evidence and agrees.
 
@@ -15,8 +15,13 @@ single, high-stakes question: *has this specific named person died?*
 
 **Live:**
 - App: [obolus-app.vercel.app](https://obolus-app.vercel.app)
-- API: [obolus-backend.fly.dev](https://obolus-backend.fly.dev)
-- Contract: `0x62dE8cd09b09721d665C4ec14aFAaDbDf15bdFdc` on GenLayer StudioNet
+- API: [obolus-api.fly.dev](https://obolus-api.fly.dev)
+- GenLayer contract (judgment only, no real value): `0x2712daCEa1b839C1b91F168756F71aDa5065497e`
+  on GenLayer StudioNet
+- ObolusEscrow (real USDC custody): `0x642C8f4De6302D06fC0620efE571dFd69DF94CEA` on Base
+  Sepolia — the payment-binding contract (`fundVault` returns a unique `paymentId`,
+  `settle()` takes a `settlementId` and rejects replays). Superseded
+  `0x1f26b190819BFf558e9FeBdC319ea9D9F1Ad6AD6`; see §9.
 
 ---
 
@@ -63,9 +68,9 @@ moves.
 
 Three linked primitives:
 
-1. **A vault** — a pot of GEN a grantor locks up, naming *who gets it* (the
-   beneficiary) and *whose death unlocks it* (the subject — usually the grantor
-   themself, but not required to be).
+1. **A vault** — a pot of USDC a grantor locks up (deposited on Base Sepolia, judged on
+   GenLayer — see §7), naming *who gets it* (the beneficiary) and *whose death unlocks
+   it* (the subject — usually the grantor themself, but not required to be).
 2. **A claim** — anyone can say "I believe the subject has died, here's my evidence."
    They post a bond as skin in the game. This opens a **contest window**, timed off
    the chain's own clock (not a caller-supplied timestamp — see §6).
@@ -121,8 +126,9 @@ appointing a fixed committee.
 `ACTIVE` → `CANCELLED`.
 
 ```
-                 create_vault (fund with GEN)
-                          │
+              create_vault (metadata only, balance starts at 0)
+                          │       then fund_vault(payment_id) once
+                          │       a real USDC deposit is confirmed
                           ▼
                      ┌─────────┐   submit_death_claim   ┌───────────────┐
         cancel_vault │ ACTIVE  │ ───────────────────────▶│ CLAIM_PENDING │
@@ -143,25 +149,32 @@ appointing a fixed committee.
 
 | Outcome | Vault balance | Claimant's bond | Contester's bond |
 |---|---|---|---|
-| Grantor cancels (no open claim) | → grantor, withdrawable | n/a | n/a |
-| `CONFIRMED` | → beneficiary, withdrawable | → returned to claimant | → each forfeited into beneficiary's payout |
-| `REFUTED` | stays in vault, reopens `ACTIVE` | → forfeited into vault | → each returned to its own contester |
-| `INCONCLUSIVE` | untouched, reopens `ACTIVE` | → returned to claimant | → each returned to its own contester |
+| Grantor cancels (no open claim) | → grantor, settled + relayed, claimable on Base | n/a | n/a |
+| `CONFIRMED` | → beneficiary, settled + relayed, claimable on Base | → settled + relayed to claimant, claimable on Base | → each forfeited into beneficiary's payout, claimable on Base |
+| `REFUTED` | stays in vault, reopens `ACTIVE` | → forfeited into vault | → each settled + relayed to its own contester, claimable on Base |
+| `INCONCLUSIVE` | untouched, reopens `ACTIVE` | → settled + relayed to claimant, claimable on Base | → each settled + relayed to its own contester, claimable on Base |
 
 ("Contester's bond" is plural in practice — see §6 for why a claim can carry more than
 one.)
 
-**All payouts are pull-based.** A verdict only *credits* an internal balance; the actual
-transfer happens only when the recipient calls `withdraw()`. Check the **Balance** page
-in the app (or `GET /balances/:address`) — money can be sitting there from an old claim
-you've forgotten about.
+**All payouts are relayed, then self-claimed — there is no `withdraw()` on GenLayer.**
+`resolve_claim`/`cancel_vault` only *record* who is owed what, as a `Settlement` row on
+GenLayer (see §7) — no real value moves there. The backend relayer reads
+`get_pending_settlements(vault_id)` and pushes the (recipient, amount) list to
+`ObolusEscrow.settle()` on Base Sepolia (the app does this automatically right after a
+wallet-signed `resolve_claim`/`cancel_vault`, and `POST /vaults/:id/relay-settlements`
+can be called again any time as a safe no-op/retry). Only then can the recipient call
+`claim()` (or `claimMany()` for several vaults at once) on `ObolusEscrow` themselves, on
+Base Sepolia, to actually receive the USDC. Check `getClaimable(vaultId, recipient)` on
+the escrow contract (or `GET /vaults/:id/settlements`) — money can be sitting there,
+unclaimed, from an old verdict you've forgotten about.
 
 ## 5. Roles
 
 | Role | Can do | Cannot do |
 |---|---|---|
 | **Grantor** | Create/fund a vault, change beneficiary, cancel — but *only* while the vault is `ACTIVE` with no open claim | Touch a vault once a claim is pending — these powers freeze the moment judgment starts |
-| **Beneficiary** | Withdraw once `PAYOUT_READY` | Nothing else — no vault-side powers |
+| **Beneficiary** | Claim their USDC on `ObolusEscrow` (Base Sepolia) once the backend relayer has pushed the settlement from a `PAYOUT_READY` verdict | Nothing else — no vault-side powers; cannot self-serve a payout before it's been relayed |
 | **Claimant** | Anyone — submit a death claim with evidence + a bond | Force a verdict; the outcome is evidence-driven only |
 | **Contester** | Anyone — submit counter-evidence + a bond before the deadline; more than one person may contest the same claim | Force a verdict; edit or remove a previously stored contest, even their own |
 | **Resolver** | Anyone — trigger `resolve_claim` once the window closes | Nothing extra; permissionless, not a privileged action |
@@ -186,10 +199,17 @@ A **death claim** takes:
 - an optional single image URL (certificate/obituary page), same Wayback-snapshot
   requirement — captured as a screenshot or raw image and shown to the model visually.
 - a free-text note (context only, e.g. "I'm his nephew" — never itself evidence).
-- a bond in GEN.
+- a `payment_id`, i.e. a bond in USDC — but never a number the claimant just types in.
+  The claimant first deposits real USDC into `ObolusEscrow.fundVault(vaultId, amount)`
+  on Base Sepolia, the backend relayer confirms that specific deposit on-chain and
+  attests it to GenLayer as a `Payment` (`record_payment`), and only *that*
+  relayer-confirmed `payment_id` can be spent as a bond (`_consume_payment` — see §7).
+  The bond amount recorded is always exactly what the confirmed deposit says, never a
+  caller-declared figure. An empty `payment_id` is allowed and declares a zero bond.
 
 A **contest** takes the mirror image: 1–5 archived URLs, one optional archived image, a
-bond. Contests are **append-only** — each submission is stored as its own row
+`payment_id`-bound bond via the same deposit → confirm-payment → spend flow. Contests
+are **append-only** — each submission is stored as its own row
 (`get_contests_for_claim` returns the full list), capped at `MAX_CONTESTS_PER_CLAIM = 20`
 per claim. Nobody, including the original submitter, can edit or overwrite a stored
 contest; a stronger proof-of-life submission already on record can never be silently
@@ -214,19 +234,64 @@ that parameter has been removed from `create_vault`, `cancel_vault`,
 ## 7. Architecture
 
 ```
-contracts/obolus.py                      the Intelligent Contract itself (GenVM/Python)
+contracts/obolus.py                      the Intelligent Contract itself (GenVM/Python) — judgment only, value-free
+contracts/base/ObolusEscrow.sol          the real USDC custody/payout contract on Base Sepolia
 examples/estate_planner_example.py       a worked consumer contract integration
-tests/direct/                            59+4 direct-mode pytest tests
-scripts/deploy.mjs                       deploys via genlayer-js (not the CLI — it hardcodes value: 0n)
-backend/                                 Express API — reads (cached), plus a relayer-signed write fallback
+tests/direct/                            74 direct-mode pytest tests on contracts/obolus.py
+backend/test/                            node --test coverage for the Base Sepolia relay logic (baseSepolia.js)
+scripts/deploy.mjs                       deploys the GenLayer contract via genlayer-js
+contracts/base/deploy.js                 deploys ObolusEscrow.sol to Base Sepolia
+backend/                                 Express API — reads (cached), a relayer-signed write fallback, and the
+                                          Base Sepolia payment relay (confirm-payment, relay-settlements)
 frontend/                                React + Vite app — writes are signed by the connected wallet
 video/                                   demo video production materials (storyboard, voiceover, on-screen copy)
 ```
 
+### Split-chain design: GenLayer judges, Base Sepolia holds the money
+
+`contracts/obolus.py` is deliberately **value-free** — it never custodies or moves real
+USDC itself. It only judges evidence and keeps a declared ledger (`balance_usdc`,
+bonds, `Settlement` records). The actual USDC lives in `contracts/base/ObolusEscrow.sol`
+on Base Sepolia. Two things bridge the two chains, both driven by the backend acting as
+a trusted relayer:
+
+- **Funding in (Base → GenLayer):** a grantor/claimant/contester deposits real USDC into
+  `ObolusEscrow.fundVault(vaultId, amount)` on Base Sepolia, which emits a `Deposited`
+  event with a unique `paymentId`. The backend's `POST /vaults/:id/confirm-payment`
+  route reads that confirmed event/receipt directly off-chain (never trusting anything
+  the caller claims) and calls GenLayer's `record_payment(payment_id, vault_id, payer,
+  amount_usdc)` — restricted to the contract's configured `relayer` address. The
+  resulting `Payment` row is what `fund_vault`, `submit_death_claim`, and `contest_claim`
+  each spend exactly once via `_consume_payment`, which checks the payment is unspent,
+  was deposited for *this* vault, and by *this* caller — see §6. This is the fix for the
+  prior value-free design, where any caller (including a direct contract call bypassing
+  the website) could declare an arbitrary `amount_usdc`/`bond_usdc` backed by no real
+  deposit at all.
+- **Payout out (GenLayer → Base):** `resolve_claim`/`cancel_vault` never move value —
+  they record `Settlement` rows (who is owed what, from which vault's escrow pool). The
+  backend polls `get_pending_settlements(vault_id)`, pushes the (recipient, amount) list
+  to `ObolusEscrow.settle(vaultId, settlementId, recipients, amounts)`, then calls
+  `mark_settlements_relayed` so the same instruction is never relayed twice. The
+  recipient still has to call `claim()`/`claimMany()` on `ObolusEscrow` themselves to
+  actually receive the USDC — see §4.
+
 ### How a write actually happens
 
-**Every write in the deployed app is signed by the user's own connected wallet — not a
-server-held key.** `frontend/src/lib/genlayerBrowser.js` builds a `genlayer-js` client
+**Every value-bearing action is a three-step flow, split across two chains and two
+signers.** Take funding a vault as the example (submitting a claim / contesting one
+follow the identical pattern): (1) the connected wallet signs and sends a real USDC
+deposit to `ObolusEscrow.fundVault(vaultId, amount)` on **Base Sepolia**; (2) the
+frontend calls the backend's `POST /vaults/:id/confirm-payment`, which reads that
+deposit's confirmed receipt and — signed by the backend's own relayer key — attests it
+to GenLayer via `record_payment`, returning a `payment_id`; (3) the connected wallet
+then signs the actual GenLayer write (`fund_vault`, `submit_death_claim`, or
+`contest_claim`) passing that `payment_id`. Steps 1 and 3 are user-signed; step 2 is the
+one place a server-held key (the relayer) signs on the user's behalf, and it can only
+ever attest a deposit it actually observed on Base — it can never fabricate one or move
+funds itself.
+
+**Every *other* write in the deployed app is signed by the user's own connected wallet —
+not a server-held key.** `frontend/src/lib/genlayerBrowser.js` builds a `genlayer-js` client
 whose `account` is the wallet's address (a plain string), which makes the SDK route
 signing through the injected wallet (`window.ethereum`) instead of a private key. On
 connect, the app force-switches the wallet onto GenLayer StudioNet
@@ -236,7 +301,10 @@ on the wrong chain.
 The backend's `/vaults`, `/claims`, `/admin` **write** routes still exist
 (`backend/src/contract.js`, signed by a `GENLAYER_PRIVATE_KEY` relayer key), kept as an
 alternative API surface for non-browser callers — scripts, other services — but the
-deployed frontend doesn't call them. Every one of these routes is gated behind
+deployed frontend doesn't call them (it only calls the always-permissionless
+`POST /vaults/:id/confirm-payment` and `POST /vaults/:id/relay-settlements` routes
+through the backend, both of which touch no funds the caller doesn't already have a
+real, chain-verified claim to). Every one of the service-key-gated routes is gated behind
 `backend/src/auth.js`'s `requireServiceKey` middleware: the caller must send a
 `x-service-key` header matching the server's `BACKEND_SERVICE_KEY` env var, or the route
 502s/401s. With no `BACKEND_SERVICE_KEY` configured (the default), the whole relayer
@@ -272,17 +340,26 @@ npm install
 # Contract
 genvm-lint check contracts/obolus.py --json
 pip install -r requirements.txt
-pytest tests/direct/ -v          # 59 tests on the primitive, 4 on the consumer example
+pytest tests/direct/ -v          # 74 direct-mode tests on the primitive + the consumer example
+npm test --workspace backend     # backend/test/baseSepolia.test.js — relay logic, no live RPC needed
 
 # Configure
 cp .env.example .env
 # fill in GENLAYER_PRIVATE_KEY (only needed for scripts/deploy.mjs and the backend's
 # relayer write fallback — the deployed frontend signs with a browser wallet instead),
-# VDE_CONTRACT_ADDRESS (skip this if you're about to deploy your own), REDIS_URL (optional),
+# VDE_CONTRACT_ADDRESS (skip this if you're about to deploy your own GenLayer contract),
+# BASE_SEPOLIA_RPC_URL / BASE_SEPOLIA_USDC_ADDRESS / OBOLUS_ESCROW_ADDRESS /
+# BASE_SEPOLIA_RELAYER_PRIVATE_KEY (the Base Sepolia payment layer — see §7; skip
+# OBOLUS_ESCROW_ADDRESS if you're about to deploy your own escrow), REDIS_URL (optional),
 # BACKEND_SERVICE_KEY (only needed if you actually want the relayer write fallback enabled)
 
-# Deploy your own contract instance (writes VDE_CONTRACT_ADDRESS into .env)
+# Deploy your own GenLayer contract instance (writes VDE_CONTRACT_ADDRESS into .env)
 node scripts/deploy.mjs
+
+# Deploy your own ObolusEscrow instance on Base Sepolia (writes nothing automatically —
+# copy the printed address into OBOLUS_ESCROW_ADDRESS yourself)
+DEPLOYER_PRIVATE_KEY=... BASE_SEPOLIA_RPC_URL=... RELAYER_ADDRESS=0x... \
+  node contracts/base/deploy.js
 
 # Backend — http://localhost:4000
 npm run backend
@@ -291,10 +368,12 @@ npm run backend
 npm run frontend
 ```
 
-To use the frontend against your own contract, connect a wallet, add/select GenLayer
+To use the frontend against your own contracts, connect a wallet, add/select GenLayer
 StudioNet (chain id `61999`, RPC `https://studio.genlayer.com/api` — the app prompts for
-this automatically on connect) and make sure `VDE_CONTRACT_ADDRESS` on the backend points
-at your deployment (`GET /platform/network` exposes it to the frontend).
+this automatically on connect) and make sure `VDE_CONTRACT_ADDRESS` and
+`OBOLUS_ESCROW_ADDRESS` on the backend point at your deployments (`GET /platform/network`
+exposes the GenLayer address to the frontend). Funding, claiming, and contesting also
+need a Base Sepolia wallet with test USDC (`BASE_SEPOLIA_USDC_ADDRESS`) and ETH for gas.
 
 ## 9. Deployment
 
@@ -307,6 +386,10 @@ flyctl apps create <your-app-name>
 flyctl secrets set \
   VDE_CONTRACT_ADDRESS=0x... \
   GENLAYER_PRIVATE_KEY=0x... \
+  BASE_SEPOLIA_RPC_URL=https://sepolia.base.org \
+  BASE_SEPOLIA_USDC_ADDRESS=0x036CbD53842c5426634e7929541eC2318f3dCF7e \
+  OBOLUS_ESCROW_ADDRESS=0x... \
+  BASE_SEPOLIA_RELAYER_PRIVATE_KEY=0x... \
   REDIS_URL=rediss://... \
   BACKEND_SERVICE_KEY=$(openssl rand -hex 32) \
   --app <your-app-name>
@@ -317,6 +400,17 @@ flyctl deploy --config fly.toml --dockerfile backend/Dockerfile --app <your-app-
 cd frontend
 vercel --prod
 ```
+
+**Current live deployment state, as of the payment-binding milestone
+([v1-milestone-review.md](v1-milestone-review.md)):** both contracts are redeployed and
+live. The GenLayer contract is at `0x2712daCEa1b839C1b91F168756F71aDa5065497e`, running
+the current payment-binding code (verified live via `get_config`). `ObolusEscrow.sol`
+on Base Sepolia is at `0x642C8f4De6302D06fC0620efE571dFd69DF94CEA`, matching the
+backend's ABI (`backend/src/lib/escrowAbi.js`) — `fundVault` returns a `paymentId` and
+`settle()` takes and dedupes a `settlementId`. Both addresses are set in `backend/.env`
+and as Fly secrets on `obolus-api`; the superseded pre-payment-binding addresses
+(`0x396865B47A0311C0254dC7B12c5Ed30683235AcE` GenLayer,
+`0x1f26b190819BFf558e9FeBdC319ea9D9F1Ad6AD6` escrow) are dead.
 
 Two Vercel settings worth knowing if you fork this: **Deployment Protection (SSO)** is
 on by default for team-scoped projects and will 302 every request, including custom
@@ -339,44 +433,60 @@ etc.) lives in [MEMORY.md](MEMORY.md) — worth reading before changing anything
 
 ## 10. API reference
 
-**Contract writes** (all payable except `withdraw`/admin calls): `create_vault`,
+**GenLayer contract writes** (value-free — none are payable; see §7): `create_vault`,
 `fund_vault`, `set_beneficiary`, `cancel_vault`, `submit_death_claim`, `contest_claim`,
-`resolve_claim`, `withdraw`, `pause`, `unpause`, `set_minimum_bonds`, `set_owner`.
+`resolve_claim`, `record_payment` (relayer-only), `mark_settlements_relayed`, `pause`,
+`unpause`, `set_minimum_bonds`, `set_owner`, `set_relayer`.
 
-**Contract views**: `get_vault`, `get_vault_count`, `get_claim`, `get_contests_for_claim`,
-`get_claims_for_vault`, `get_vaults_for_grantor`, `get_vaults_for_beneficiary`,
-`get_balance_of`, `is_resolvable`, `get_platform_stats`, `get_config`.
+**GenLayer contract views**: `get_vault`, `get_vault_count`, `get_claim`,
+`get_contests_for_claim`, `get_claims_for_vault`, `get_vaults_for_grantor`,
+`get_vaults_for_beneficiary`, `get_settlements_for_vault`, `get_pending_settlements`,
+`get_payment`, `is_resolvable`, `get_platform_stats`, `get_config`.
+
+**ObolusEscrow (Base Sepolia) writes**: `fundVault`, `settle` (relayer-only), `claim`,
+`claimMany`, `setRelayer`/`transferOwnership`/`withdrawUnallocated` (owner-only).
+**ObolusEscrow views**: `getPool`, `getClaimable`.
 
 Full docstrings live in [`contracts/obolus.py`](contracts/obolus.py). `get_claim`'s
-response includes `contest_count` and `total_contester_bond_wei` (aggregates across all
+response includes `contest_count` and `total_contester_bond_usdc` (aggregates across all
 stored contests) rather than a single contester's fields — fetch the individual rows
 with `get_contests_for_claim` / `GET /claims/:id/contests`.
 
 **Backend REST surface** (`backend/src/routes/`), all under `/api/*` from the frontend:
 
-| Method & path | Contract call |
-|---|---|
-| `GET /vaults/:id` | `get_vault` |
-| `GET /vaults` | `get_vault_count` |
-| `GET /vaults/:id/claims` | `get_claims_for_vault` |
-| `GET /vaults/by-grantor/:address` | `get_vaults_for_grantor` |
-| `GET /vaults/by-beneficiary/:address` | `get_vaults_for_beneficiary` |
-| `POST /vaults` | `create_vault` |
-| `POST /vaults/:id/fund` | `fund_vault` |
-| `POST /vaults/:id/beneficiary` | `set_beneficiary` |
-| `POST /vaults/:id/cancel` | `cancel_vault` |
-| `POST /vaults/:vaultId/claims` | `submit_death_claim` |
-| `GET /claims/:id` | `get_claim` |
-| `GET /claims/:id/contests` | `get_contests_for_claim` |
-| `GET /claims/:id/resolvable` | `is_resolvable` |
-| `POST /claims/:id/contest` | `contest_claim` |
-| `POST /claims/:id/resolve` | `resolve_claim` |
-| `GET /balances/:address` | `get_balance_of` |
-| `POST /balances/withdraw` | `withdraw` |
-| `GET /platform/stats` | `get_platform_stats` |
-| `GET /platform/config` | `get_config` |
-| `GET /platform/network` | contract address + network name (public, no contract call) |
-| `POST /admin/pause` / `/admin/unpause` / `/admin/minimum-bonds` / `/admin/owner` | owner-only writes |
+| Method & path | Body | Contract call |
+|---|---|---|
+| `GET /vaults/:id` | | `get_vault` |
+| `GET /vaults` | | `get_vault_count` |
+| `GET /vaults/:id/claims` | | `get_claims_for_vault` |
+| `GET /vaults/by-grantor/:address` | | `get_vaults_for_grantor` |
+| `GET /vaults/by-beneficiary/:address` | | `get_vaults_for_beneficiary` |
+| `POST /vaults` | `{ beneficiary, subjectName, subjectAkaJson, subjectBirthYear, contestWindowSeconds }` | `create_vault` (metadata only — vault starts at balance 0) |
+| `GET /vaults/:id/escrow-fund-calldata?amountUsdc=N` | | none — returns `approve` + `fundVault` calldata for the wallet to send on Base Sepolia |
+| `POST /vaults/:id/confirm-payment` | `{ txHash }` (of the Base Sepolia deposit) | `record_payment`, after reading the confirmed `Deposited` event itself |
+| `POST /vaults/:id/fund` | `{ paymentId }` | `fund_vault` |
+| `POST /vaults/:id/beneficiary` | `{ newBeneficiary }` | `set_beneficiary` |
+| `POST /vaults/:id/cancel` | | `cancel_vault` (+ auto-relays any resulting settlement) |
+| `POST /vaults/:vaultId/claims` | `{ evidenceUrlsJson, evidenceImageUrl, note, paymentId }` | `submit_death_claim` |
+| `GET /claims/:id` | | `get_claim` |
+| `GET /claims/:id/contests` | | `get_contests_for_claim` |
+| `GET /claims/:id/resolvable` | | `is_resolvable` |
+| `POST /claims/:id/contest` | `{ contestUrlsJson, contestImageUrl, paymentId }` | `contest_claim` |
+| `POST /claims/:id/resolve` | | `resolve_claim` (+ auto-relays any resulting settlement) |
+| `GET /vaults/:id/settlements` | | `get_settlements_for_vault` |
+| `POST /vaults/:id/relay-settlements` | | none — reads `get_pending_settlements`, pushes them to `ObolusEscrow.settle()`, then calls `mark_settlements_relayed` |
+| `GET /vaults/:id/escrow-claim-calldata` | | none — returns `claim()` calldata for the wallet to send on Base Sepolia |
+| `GET /platform/stats` | | `get_platform_stats` |
+| `GET /platform/config` | | `get_config` |
+| `GET /platform/network` | | contract address + network name (public, no contract call) |
+| `POST /admin/pause` / `/admin/unpause` / `/admin/minimum-bonds` / `/admin/owner` | | owner-only writes |
+
+`POST /vaults`, `POST /vaults/:id/beneficiary`, `POST /vaults/:id/cancel`,
+`POST /claims/:id/contest`, and `POST /claims/:id/resolve` are gated behind
+`requireServiceKey` (the relayer-signed write fallback — see §7); `POST /vaults/:id/fund`
+and `POST /vaults/:vaultId/claims` likewise require a service key at their mount site.
+`POST /vaults/:id/confirm-payment` and `POST /vaults/:id/relay-settlements` are
+deliberately permissionless — see §7 for why that's safe.
 
 ## 11. Known limitations
 
