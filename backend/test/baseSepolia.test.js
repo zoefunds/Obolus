@@ -9,7 +9,13 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { deriveSettlementId, relaySettlementsToEscrow } from "../src/baseSepolia.js";
+import { ethers } from "ethers";
+import { OBOLUS_ESCROW_ABI } from "../src/lib/escrowAbi.js";
+import { deriveSettlementId, findConfirmedDeposit, relaySettlementsToEscrow, vaultIdToBytes32 } from "../src/baseSepolia.js";
+
+const ESCROW_ADDRESS = "0x642C8f4De6302D06fC0620efE571dFd69DF94CEA";
+const PAYER = "0x6f0b4ce7a1872db132b2f6b7743defb30eba698a";
+const SMART_ACCOUNT = "0xdb9b1e94b5b69df7e401ddbede43491141047db3";
 
 function fakeContract() {
   const state = { settledIds: new Set(), settleCalls: [] };
@@ -93,4 +99,39 @@ test("an all-zero settlement batch never touches the contract", async () => {
   const result = await relaySettlementsToEscrow(3, [{ id: 1, recipient: "0x1", amount_usdc: "0" }], contract);
   assert.equal(contract.state.settleCalls.length, 0);
   assert.deepEqual(result, { txHash: null, ids: [] });
+});
+
+test("readConfirmedDeposit accepts an escrow event nested in a smart-account transaction", async () => {
+  // Smart-account / account-abstraction transactions have receipt.to set to
+  // the account contract, not the downstream escrow contract. The escrow's
+  // own authenticated Deposited log remains the source of truth.
+  const iface = new ethers.Interface(OBOLUS_ESCROW_ABI);
+  const vaultId = 7;
+  const amount = 2_000_000n;
+  const paymentId = ethers.keccak256("0x1234");
+  const encoded = iface.encodeEventLog(iface.getEvent("Deposited"), [vaultIdToBytes32(vaultId), PAYER, amount, paymentId]);
+  const receipt = {
+    status: 1,
+    to: SMART_ACCOUNT,
+    logs: [{ address: ESCROW_ADDRESS, topics: encoded.topics, data: encoded.data }],
+  };
+
+  const deposit = findConfirmedDeposit(vaultId, receipt, ESCROW_ADDRESS);
+  assert.equal(deposit.vaultId, vaultId);
+  assert.equal(deposit.payer.toLowerCase(), PAYER);
+  assert.equal(deposit.amount, String(amount));
+  assert.equal(deposit.paymentId, paymentId);
+});
+
+test("readConfirmedDeposit still rejects a log that was not emitted by the configured escrow", async () => {
+  const receipt = {
+    status: 1,
+    to: SMART_ACCOUNT,
+    logs: [],
+  };
+
+  assert.throws(
+    () => findConfirmedDeposit(7, receipt, ESCROW_ADDRESS),
+    /has no Deposited event for vault 7/
+  );
 });

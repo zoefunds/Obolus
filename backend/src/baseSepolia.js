@@ -119,23 +119,22 @@ export async function relaySettlementsToEscrow(vaultId, settlements, contractOve
  * caller cannot claim a payment_id for a deposit that didn't happen, or
  * for a different vault/amount than what was actually deposited.
  *
- * Throws if the tx isn't mined yet, didn't succeed, wasn't sent to this
- * escrow, or has no Deposited event for `vaultId`.
+ * Throws if the tx isn't mined yet, didn't succeed, or has no matching
+ * `Deposited` event emitted by this escrow for `vaultId`.
+ *
+ * Do not require `receipt.to === ESCROW_ADDRESS` here. Account-abstraction
+ * wallets send an outer transaction to their smart account, which then calls
+ * the escrow. In that valid case the receipt's `to` is the wallet, while the
+ * escrow event is still emitted from — and cryptographically attributable to
+ * — this exact configured contract. The log address, event signature, and
+ * vault key below are the authoritative payment binding.
  */
-export async function readConfirmedDeposit(vaultId, txHash) {
-  if (!ESCROW_ADDRESS) throw new Error("OBOLUS_ESCROW_ADDRESS is not configured");
-  const provider = getProvider();
-  const receipt = await provider.getTransactionReceipt(txHash);
-  if (!receipt) throw new Error(`transaction ${txHash} not found or not yet mined`);
-  if (receipt.status !== 1) throw new Error(`transaction ${txHash} did not succeed`);
-  if (receipt.to && receipt.to.toLowerCase() !== ESCROW_ADDRESS.toLowerCase()) {
-    throw new Error(`transaction ${txHash} was not sent to the configured escrow contract`);
-  }
-
+export function findConfirmedDeposit(vaultId, receipt, escrowAddress = ESCROW_ADDRESS) {
+  if (!escrowAddress) throw new Error("OBOLUS_ESCROW_ADDRESS is not configured");
   const iface = new ethers.Interface(OBOLUS_ESCROW_ABI);
   const key = vaultIdToBytes32(vaultId);
   for (const log of receipt.logs) {
-    if (log.address.toLowerCase() !== ESCROW_ADDRESS.toLowerCase()) continue;
+    if (log.address.toLowerCase() !== escrowAddress.toLowerCase()) continue;
     let parsed;
     try {
       parsed = iface.parseLog(log);
@@ -151,7 +150,23 @@ export async function readConfirmedDeposit(vaultId, txHash) {
       paymentId: parsed.args.paymentId,
     };
   }
-  throw new Error(`transaction ${txHash} has no Deposited event for vault ${vaultId}`);
+  throw new Error(`transaction has no Deposited event for vault ${vaultId}`);
+}
+
+export async function readConfirmedDeposit(vaultId, txHash, providerOverride = null) {
+  if (!ESCROW_ADDRESS) throw new Error("OBOLUS_ESCROW_ADDRESS is not configured");
+  const provider = providerOverride || getProvider();
+  const receipt = await provider.getTransactionReceipt(txHash);
+  if (!receipt) throw new Error(`transaction ${txHash} not found or not yet mined`);
+  if (receipt.status !== 1) throw new Error(`transaction ${txHash} did not succeed`);
+  try {
+    return findConfirmedDeposit(vaultId, receipt);
+  } catch (err) {
+    if (/^transaction has no Deposited event/.test(err.message)) {
+      throw new Error(`transaction ${txHash} has no Deposited event for vault ${vaultId}`);
+    }
+    throw err;
+  }
 }
 
 export async function getEscrowPool(vaultId) {
