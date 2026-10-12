@@ -15,7 +15,7 @@ single, high-stakes question: *has this specific named person died?*
 
 **Live:**
 - App: [obolus-app.vercel.app](https://obolus-app.vercel.app)
-- API: [obolus-api.fly.dev](https://obolus-api.fly.dev)
+- API: [obolus-api-gideon.fly.dev](https://obolus-api-gideon.fly.dev)
 - GenLayer contract (judgment only, no real value): `0x2712daCEa1b839C1b91F168756F71aDa5065497e`
   on GenLayer StudioNet
 - ObolusEscrow (real USDC custody): `0x642C8f4De6302D06fC0620efE571dFd69DF94CEA` on Base
@@ -408,7 +408,7 @@ the current payment-binding code (verified live via `get_config`). `ObolusEscrow
 on Base Sepolia is at `0x642C8f4De6302D06fC0620efE571dFd69DF94CEA`, matching the
 backend's ABI (`backend/src/lib/escrowAbi.js`) — `fundVault` returns a `paymentId` and
 `settle()` takes and dedupes a `settlementId`. Both addresses are set in `backend/.env`
-and as Fly secrets on `obolus-api`; the superseded pre-payment-binding addresses
+and as Fly secrets on `obolus-api-gideon`; the superseded pre-payment-binding addresses
 (`0x396865B47A0311C0254dC7B12c5Ed30683235AcE` GenLayer,
 `0x1f26b190819BFf558e9FeBdC319ea9D9F1Ad6AD6` escrow) are dead.
 
