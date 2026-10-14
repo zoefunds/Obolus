@@ -24,6 +24,8 @@ transactions, trust boundaries, and release verification.
   successful GenVM return.
 - The relay never signs settlement authorization. The isolated authorizer reads
   latest-final state independently and signs exact allocations only.
+- The Fly authorizer listens on IPv6 (`::`) because private `.internal` service
+  discovery resolves to the machine's IPv6 address.
 - Settlement replay protection is per entitlement, not per batch.
 - A failed-deposit refund requires a finalized GenLayer tombstone before the
   authorizer signs Base calldata.
@@ -51,3 +53,9 @@ distinct beneficiary withdrew all 100,000 units. The escrow has zero token balan
 and zero remaining beneficiary credit; its vault pool records 100,000 deposited and
 100,000 allocated. Exact immutable links are in
 [`docs/SECURITY_REMEDIATION.md`](docs/SECURITY_REMEDIATION.md).
+
+The remediation history begins at
+[`fa5a9e9`](https://github.com/zoefunds/Obolus/commit/fa5a9e9c55dce069969ec46e8cb95dd9b71fcebb).
+The branch-relative comparison is
+[`fa5a9e9...main`](https://github.com/zoefunds/Obolus/compare/fa5a9e9c55dce069969ec46e8cb95dd9b71fcebb...main);
+release responses should use the immutable end-commit comparison.

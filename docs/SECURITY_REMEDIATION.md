@@ -3,6 +3,13 @@
 This document describes the corrected cross-chain trust boundary and the exact
 deployment now configured by the application.
 
+The remediation series begins at
+[`fa5a9e9`](https://github.com/zoefunds/Obolus/commit/fa5a9e9c55dce069969ec46e8cb95dd9b71fcebb).
+The continuously current branch comparison is
+[`fa5a9e9...main`](https://github.com/zoefunds/Obolus/compare/fa5a9e9c55dce069969ec46e8cb95dd9b71fcebb...main);
+an immutable comparison to the final documentation commit is provided in the release
+handoff.
+
 ## Current deployment
 
 | Component | Address / service | Immutable reference |

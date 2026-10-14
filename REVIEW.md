@@ -4,6 +4,10 @@ This is the current response to the custody, authorization, finality, refund,
 evidence-fairness, indexing, replay, testing, and deployment findings. Detailed
 invariants and immutable deployment references are in
 [`docs/SECURITY_REMEDIATION.md`](docs/SECURITY_REMEDIATION.md).
+The review remediation starts at
+[`fa5a9e9`](https://github.com/zoefunds/Obolus/commit/fa5a9e9c55dce069969ec46e8cb95dd9b71fcebb),
+with a live branch comparison at
+[`fa5a9e9...main`](https://github.com/zoefunds/Obolus/compare/fa5a9e9c55dce069969ec46e8cb95dd9b71fcebb...main).
 
 ## Completed corrections
 
@@ -43,6 +47,9 @@ invariants and immutable deployment references are in
   the independent authorizer approved the exact entitlement, and the beneficiary
   withdrew the full 0.10 USDC. The public transaction links and balance deltas
   are recorded in [`docs/SECURITY_REMEDIATION.md`](docs/SECURITY_REMEDIATION.md).
+- The failed-payment recovery path was exercised against the deployed contracts:
+  the finalized GenLayer tombstone and independent authorization returned the
+  unconsumed deposit only to its original payer.
 - Final deployment addresses and transaction links are recorded in
   [`docs/SECURITY_REMEDIATION.md`](docs/SECURITY_REMEDIATION.md).
 

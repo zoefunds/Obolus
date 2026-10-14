@@ -27,6 +27,12 @@ Sepolia, then withdrawn by a distinct beneficiary wallet. Exact transaction link
 balance deltas, and verification details are recorded in
 [`docs/SECURITY_REMEDIATION.md`](docs/SECURITY_REMEDIATION.md).
 
+The complete remediation change set starts at commit
+[`fa5a9e9`](https://github.com/zoefunds/Obolus/commit/fa5a9e9c55dce069969ec46e8cb95dd9b71fcebb);
+use the immutable compare link supplied with the latest release or
+[`fa5a9e9...main`](https://github.com/zoefunds/Obolus/compare/fa5a9e9c55dce069969ec46e8cb95dd9b71fcebb...main)
+to inspect the current branch tip.
+
 ---
 
 ## Table of contents
@@ -455,7 +461,8 @@ in [`docs/SECURITY_REMEDIATION.md`](docs/SECURITY_REMEDIATION.md).
 **GenLayer contract writes** (value-free — none are payable; see §7): `create_vault`,
 `fund_vault`, `set_beneficiary`, `cancel_vault`, `submit_death_claim`, `contest_claim`,
 `resolve_claim`, `record_payment` (relayer-only), `mark_settlements_relayed`, `pause`,
-`unpause`, `set_minimum_bonds`, `set_owner`, `set_relayer`.
+`unpause`, `set_minimum_bonds`, `set_owner`, `set_relayer`, and
+`void_payment_for_refund` (relayer-only finalized refund tombstone).
 
 **GenLayer contract views**: `get_vault`, `get_vault_count`, `get_claim`,
 `get_contests_for_claim`, `get_claims_for_vault`, `get_vaults_for_grantor`,
@@ -468,7 +475,9 @@ independent finalized-ruling authorization), `refundFailedPayment` (original pay
 plus independent authorization), `claim`, `claimMany`, `setRelayer`,
 `rotateSettlementAuthorizer` (current authorizer only), and `transferOwnership`.
 There is no owner withdrawal and the owner cannot seize the authorizer role.
-**ObolusEscrow views**: `getPool`, `getClaimable`.
+**ObolusEscrow views**: `getPool`, `getClaimable`, `totalClaimable`, `paymentExists`,
+`deposits`, `settledIds`, `settlementAuthorizationDigest`,
+`refundAuthorizationDigest`, `owner`, `relayer`, and `settlementAuthorizer`.
 
 Full docstrings live in [`contracts/obolus.py`](contracts/obolus.py). `get_claim`'s
 response includes `contest_count` and `total_contester_bond_usdc` (aggregates across all

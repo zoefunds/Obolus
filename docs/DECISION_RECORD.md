@@ -1,5 +1,18 @@
 # Decision Record — Verifiable Decease Escrow (VDE)
 
+## Implemented outcome
+
+The selected design now runs as a two-chain system: GenLayer StudioNet performs
+evidence adjudication and records entitlements, while `ObolusEscrow` on Base Sepolia
+holds and transfers real test USDC. Settlement requires both the relay transaction and
+an independent authorizer signature derived from finalized GenLayer state. Individual
+entitlements are replay-protected, delivery is reconciled from Base state, failed
+unconsumed deposits have a payer-only authorized refund path, and beneficiaries use
+pull withdrawals. A funded public-chain E2E has exercised deposit, attestation,
+adjudication, authorization, allocation, and withdrawal. Current addresses, transaction
+proofs, test totals, and remaining external CI limitation are maintained in
+[`SECURITY_REMEDIATION.md`](SECURITY_REMEDIATION.md).
+
 ## Candidates generated (12+, spanning capability areas)
 
 1. **Verifiable Decease Escrow** — releases Base Sepolia USDC to a beneficiary only when
