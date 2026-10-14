@@ -2,7 +2,7 @@ import { Router } from "express";
 import { readMethod, writeMethod } from "../contract.js";
 import { cached, invalidate } from "../cache.js";
 import { requireServiceKey } from "../auth.js";
-import { relaySettlementsToEscrow, isEscrowConfigured } from "../baseSepolia.js";
+import { relaySettlementsToEscrow, isEscrowConfigured, readAllSettlementCandidates } from "../baseSepolia.js";
 
 export const claimsRouter = Router();
 
@@ -103,7 +103,7 @@ claimsRouter.post("/:id/resolve", requireServiceKey, async (req, res, next) => {
       try {
         const claimView = await readMethod("get_claim", [Number(req.params.id)]);
         const vaultId = Number(claimView.vault_id);
-        const pending = await readMethod("get_pending_settlements", [vaultId]);
+        const pending = await readAllSettlementCandidates(readMethod, vaultId);
         if (pending.length > 0) {
           const { acknowledgments = [] } = await relaySettlementsToEscrow(vaultId, pending);
           for (const acknowledgment of acknowledgments) {

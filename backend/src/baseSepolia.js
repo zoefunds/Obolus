@@ -6,8 +6,9 @@
  * docs/SECURITY_REMEDIATION.md). Real USDC lives in ObolusEscrow
  * (contracts/base/ObolusEscrow.sol) on Base Sepolia. This module is the
  * only place that talks to that contract: turning a GenLayer vault id into
- * the escrow's bytes32 key, and relaying a vault's pending settlements
- * (from GenLayer's get_pending_settlements) exactly once each.
+ * the escrow's bytes32 key, and reconciling a vault's settlement index
+ * from GenLayer exactly once each. Delivery is derived from Base's
+ * settledIds mapping, never from the advisory GenLayer relayed flag.
  */
 import { ethers } from "ethers";
 import { OBOLUS_ESCROW_ABI, ERC20_ABI } from "./lib/escrowAbi.js";
@@ -80,6 +81,18 @@ export function deriveIndividualSettlementId(vaultId, settlementId) {
   );
 }
 
+/** Read the complete finalized GenLayer settlement index. This intentionally
+ * includes rows marked relayed: a compromised relayer must not be able to hide
+ * an unpaid entitlement by writing a fabricated acknowledgment on GenLayer. */
+export async function readAllSettlementCandidates(read, vaultId, pageSize = 100) {
+  const rows = [];
+  for (let offset = 0; ; offset += pageSize) {
+    const page = await read("get_settlements_page", [Number(vaultId), offset, pageSize], { finalized: true });
+    rows.push(...page);
+    if (page.length < pageSize) return rows;
+  }
+}
+
 async function requestAuthorization(payload) {
   if (!AUTHORIZER_URL) throw new Error("SETTLEMENT_AUTHORIZER_URL is not configured");
   const response = await fetch(AUTHORIZER_URL, {
@@ -134,7 +147,7 @@ export async function buildFailedPaymentRefundCalldata(vaultId, txHash, expected
 }
 
 /**
- * Push a vault's still-pending GenLayer settlements onto the Base Sepolia
+ * Reconcile a vault's complete GenLayer settlement index with Base Sepolia,
  * escrow, then return their ids so the caller can confirm them back on
  * GenLayer via mark_settlements_relayed. The escrow's own cumulative-
  * allocation guard (see ObolusEscrow.settle) is the real backstop against
@@ -164,45 +177,48 @@ export async function relaySettlementsToEscrow(
   const amounts = nonZero.map((s) => BigInt(s.amount_usdc));
 
   const alreadyApplied = await Promise.all(settlementIds.map((id) => contract.settledIds(id)));
-  if (alreadyApplied.some(Boolean)) {
-    if (alreadyApplied.every(Boolean)) {
-      const acknowledgments = [];
-      if (contract.filters?.SettlementApplied && contract.queryFilter) {
-        const groups = new Map();
-        for (let i = 0; i < settlementIds.length; i++) {
-          const logs = await contract.queryFilter(
-            contract.filters.SettlementApplied(settlementIds[i]),
-            ESCROW_DEPLOY_BLOCK,
-            "latest",
-          );
-          if (logs.length === 0) throw new Error(`applied settlement ${ids[i]} has no delivery event`);
-          const txHash = logs[logs.length - 1].transactionHash;
-          groups.set(txHash, [...(groups.get(txHash) || []), ids[i]]);
-        }
-        for (const [txHash, deliveredIds] of groups) acknowledgments.push({ txHash, ids: deliveredIds });
-      }
-      return { txHash: null, ids, settlementIds, acknowledgments };
+  const acknowledgments = [];
+  const appliedGroups = new Map();
+  for (let i = 0; i < settlementIds.length; i++) {
+    if (!alreadyApplied[i]) continue;
+    if (!contract.filters?.SettlementApplied || !contract.queryFilter) {
+      throw new Error(`cannot verify applied settlement ${ids[i]} without Base event access`);
     }
-    throw new Error("partial settlement overlap detected; reconcile individual items before retrying");
+    const logs = await contract.queryFilter(
+      contract.filters.SettlementApplied(settlementIds[i]), ESCROW_DEPLOY_BLOCK, "latest",
+    );
+    if (logs.length === 0) throw new Error(`applied settlement ${ids[i]} has no delivery event`);
+    const txHash = logs[logs.length - 1].transactionHash;
+    appliedGroups.set(txHash, [...(appliedGroups.get(txHash) || []), ids[i]]);
   }
+  for (const [txHash, deliveredIds] of appliedGroups) acknowledgments.push({ txHash, ids: deliveredIds });
+
+  const freshIndexes = alreadyApplied.map((applied, index) => applied ? -1 : index).filter((index) => index >= 0);
+  if (freshIndexes.length === 0) {
+    return { txHash: null, ids, settlementIds, acknowledgments };
+  }
+  const freshIds = freshIndexes.map((i) => ids[i]);
+  const freshSettlementIds = freshIndexes.map((i) => settlementIds[i]);
+  const freshRecipients = freshIndexes.map((i) => recipients[i]);
+  const freshAmounts = freshIndexes.map((i) => amounts[i]);
 
   const authorize = authorizeOverride || requestAuthorization;
   const auth = await authorize({
     vaultId: Number(vaultId),
     escrowAddress: ESCROW_ADDRESS || null,
     genlayerContract: process.env.VDE_CONTRACT_ADDRESS || null,
-    settlementIds: ids,
-    baseSettlementIds: settlementIds,
-    recipients,
-    amounts: amounts.map(String),
+    settlementIds: freshIds,
+    baseSettlementIds: freshSettlementIds,
+    recipients: freshRecipients,
+    amounts: freshAmounts.map(String),
     requiredGenLayerStatus: "FINALIZED",
   });
   const tx = await contract.settle(
     key,
     auth.rulingHash,
-    settlementIds,
-    recipients,
-    amounts,
+    freshSettlementIds,
+    freshRecipients,
+    freshAmounts,
     BigInt(auth.authorizationDeadline),
     auth.authorization,
   );
@@ -215,7 +231,7 @@ export async function relaySettlementsToEscrow(
     ids,
     settlementIds,
     rulingHash: auth.rulingHash,
-    acknowledgments: [{ txHash: tx.hash, ids }],
+    acknowledgments: [...acknowledgments, { txHash: tx.hash, ids: freshIds }],
   };
 }
 

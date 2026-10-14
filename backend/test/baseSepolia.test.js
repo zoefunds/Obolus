@@ -11,7 +11,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { ethers } from "ethers";
 import { OBOLUS_ESCROW_ABI } from "../src/lib/escrowAbi.js";
-import { deriveSettlementId, findConfirmedDeposit, relaySettlementsToEscrow, vaultIdToBytes32 } from "../src/baseSepolia.js";
+import { deriveSettlementId, findConfirmedDeposit, readAllSettlementCandidates, relaySettlementsToEscrow, vaultIdToBytes32 } from "../src/baseSepolia.js";
 
 const ESCROW_ADDRESS = "0x642C8f4De6302D06fC0620efE571dFd69DF94CEA";
 const PAYER = "0x6f0b4ce7a1872db132b2f6b7743defb30eba698a";
@@ -109,18 +109,40 @@ test("a genuinely NEW batch for the same vault is still relayed normally", async
   assert.equal(contract.state.settleCalls.length, 2, "a different settlement set derives a different settlementId and is allowed through");
 });
 
-test("partially overlapping batches are rejected before a Base transaction", async () => {
+test("partially overlapping batches reconcile delivered rows and settle only missing entitlements", async () => {
   const contract = fakeContract();
   const oneTwo = [
     { id: 1, recipient: "0x0000000000000000000000000000000000000001", amount_usdc: "5" },
     { id: 2, recipient: "0x0000000000000000000000000000000000000002", amount_usdc: "5" },
   ];
   await relaySettlementsToEscrow(3, oneTwo, contract, fakeAuthorize);
-  await assert.rejects(
-    relaySettlementsToEscrow(3, [oneTwo[1], { id: 3, recipient: "0x0000000000000000000000000000000000000003", amount_usdc: "5" }], contract, fakeAuthorize),
-    /partial settlement overlap/
+  const mixed = await relaySettlementsToEscrow(
+    3,
+    [oneTwo[1], { id: 3, recipient: "0x0000000000000000000000000000000000000003", amount_usdc: "5" }],
+    contract,
+    async (payload) => {
+      assert.deepEqual(payload.settlementIds, [3]);
+      return fakeAuthorize();
+    },
   );
-  assert.equal(contract.state.settleCalls.length, 1);
+  assert.equal(contract.state.settleCalls.length, 2);
+  assert.deepEqual(contract.state.settleCalls[1].recipients, ["0x0000000000000000000000000000000000000003"]);
+  assert.deepEqual(mixed.acknowledgments.map((entry) => entry.ids), [[2], [3]]);
+});
+
+test("complete finalized candidate paging ignores a forged relayed flag", async () => {
+  const pages = [
+    [{ id: 1, relayed: true }, { id: 2, relayed: false }],
+    [{ id: 3, relayed: true }],
+  ];
+  const calls = [];
+  const rows = await readAllSettlementCandidates(async (method, args, options) => {
+    calls.push({ method, args, options });
+    return pages[calls.length - 1] || [];
+  }, 9, 2);
+  assert.deepEqual(rows.map((row) => row.id), [1, 2, 3]);
+  assert.equal(calls[0].method, "get_settlements_page");
+  assert.deepEqual(calls[0].options, { finalized: true });
 });
 
 test("failed or non-final GenLayer authorization never reaches Base settle", async () => {

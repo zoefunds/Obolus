@@ -54,7 +54,7 @@ export function assertExactFinalizedSettlement(payload, finalizedRows) {
   }));
   const expected = normalizeRows(finalizedRows);
   if (JSON.stringify(proposed) !== JSON.stringify(expected)) {
-    throw new Error("proposal does not exactly match latest-final GenLayer pending settlements");
+    throw new Error("proposal does not exactly match latest-final GenLayer entitlements missing on Base");
   }
   const expectedBaseIds = proposed.map((row) => individualSettlementId(payload.vaultId, row.id));
   if (JSON.stringify(expectedBaseIds) !== JSON.stringify(payload.baseSettlementIds)) {
@@ -72,13 +72,16 @@ async function readFinal(functionName, args) {
   }));
 }
 
-async function allFinalPending(vaultId) {
+async function allFinalUnapplied(vaultId, escrow) {
   const rows = [];
   for (let offset = 0; ; offset += PAGE_SIZE) {
-    const page = await readFinal("get_pending_settlements_page", [Number(vaultId), offset, PAGE_SIZE]);
+    const page = await readFinal("get_settlements_page", [Number(vaultId), offset, PAGE_SIZE]);
     rows.push(...page);
-    if (page.length < PAGE_SIZE) return rows;
+    if (page.length < PAGE_SIZE) break;
   }
+  const nonZero = rows.filter((row) => BigInt(row.amount_usdc || "0") > 0n);
+  const applied = await Promise.all(nonZero.map((row) => escrow.settledIds(individualSettlementId(vaultId, row.id))));
+  return nonZero.filter((_row, index) => !applied[index]);
 }
 
 function runtime() {
@@ -95,7 +98,7 @@ async function authorizeSettlement(payload, deps) {
   if (payload.requiredGenLayerStatus !== "FINALIZED") throw new Error("FINALIZED status is required");
   if (String(payload.genlayerContract).toLowerCase() !== CONTRACT_ADDRESS.toLowerCase()) throw new Error("wrong GenLayer contract");
   if (String(payload.escrowAddress).toLowerCase() !== ESCROW_ADDRESS.toLowerCase()) throw new Error("wrong Base escrow");
-  const finalRows = await allFinalPending(payload.vaultId);
+  const finalRows = await allFinalUnapplied(payload.vaultId, deps.escrow);
   const rows = assertExactFinalizedSettlement(payload, finalRows);
   const deadline = Math.floor(Date.now() / 1000) + MAX_AUTH_SECONDS;
   const ids = rows.map((row) => row.id);

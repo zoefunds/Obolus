@@ -160,8 +160,8 @@ one.)
 
 **All payouts are relayed, then self-claimed — there is no `withdraw()` on GenLayer.**
 `resolve_claim`/`cancel_vault` only *record* who is owed what, as a `Settlement` row on
-GenLayer (see §7) — no real value moves there. The backend relayer reads
-`get_pending_settlements(vault_id)` and pushes the (recipient, amount) list to
+GenLayer (see §7) — no real value moves there. The backend relayer reads the complete
+paginated settlement index, verifies individual delivery against Base `settledIds`, and pushes missing (recipient, amount) rows to
 `ObolusEscrow.settle()` on Base Sepolia (the app does this automatically right after a
 wallet-signed `resolve_claim`/`cancel_vault`, and `POST /vaults/:id/relay-settlements`
 can be called again any time as a safe no-op/retry). Only then can the recipient call
@@ -237,8 +237,9 @@ that parameter has been removed from `create_vault`, `cancel_vault`,
 contracts/obolus.py                      the Intelligent Contract itself (GenVM/Python) — judgment only, value-free
 contracts/base/ObolusEscrow.sol          the real USDC custody/payout contract on Base Sepolia
 examples/estate_planner_example.py       a worked consumer contract integration
-tests/direct/                            82 direct-mode pytest tests on contracts/obolus.py
+tests/direct/                            83 direct-mode pytest tests on contracts/obolus.py
 backend/test/                            node --test coverage for relay, authorizer, and Solidity compilation
+contracts/base/test/                     6 executable Foundry escrow security and withdrawal tests
 scripts/deploy.mjs                       deploys the GenLayer contract via genlayer-js
 contracts/base/deploy.js                 deploys ObolusEscrow.sol to Base Sepolia
 backend/                                 Express API, relayer fallback, and Base Sepolia payment relay
@@ -269,8 +270,9 @@ a trusted relayer:
   refund is signed, so an in-flight or later attestation cannot revive refunded USDC.
 - **Payout out (GenLayer → Base):** `resolve_claim`/`cancel_vault` never move value —
   they record `Settlement` rows (who is owed what, from which vault's escrow pool). The
-  backend reads paginated latest-final pending settlements. A separately deployed
-  authorizer independently repeats that read and signs the exact ruling hash,
+  backend reads the complete paginated latest-final settlement index and treats Base's
+  per-entitlement `settledIds` as delivery truth. A separately deployed authorizer
+  independently repeats that reconciliation and signs the exact ruling hash,
   per-entitlement replay IDs, recipients, amounts, chain, escrow, and expiry. Only then
   can the relayer call `ObolusEscrow.settle`; afterward it calls
   `mark_settlements_relayed(ids, baseTxHash)` at finality. The
@@ -342,8 +344,9 @@ npm install
 # Contract
 genvm-lint check contracts/obolus.py --json
 pip install -r requirements.txt
-pytest tests/direct/ -v          # 82 direct-mode tests
-npm test --workspace backend     # 18 relay/authorizer/finality/Solidity tests
+pytest tests/direct/ -v          # 83 direct-mode tests
+npm test --workspace backend     # 19 relay/authorizer/finality/Solidity tests
+forge test -vv                   # 6 executable escrow security/withdrawal tests
 
 # Configure
 cp .env.example .env
@@ -492,7 +495,7 @@ with `get_contests_for_claim` / `GET /claims/:id/contests`.
 | `POST /claims/:id/contest` | `{ contestUrlsJson, contestImageUrl, paymentId }` | `contest_claim` |
 | `POST /claims/:id/resolve` | | `resolve_claim` (+ auto-relays any resulting settlement) |
 | `GET /vaults/:id/settlements` | | `get_settlements_for_vault` |
-| `POST /vaults/:id/relay-settlements` | | none — reads `get_pending_settlements`, pushes them to `ObolusEscrow.settle()`, then calls `mark_settlements_relayed` |
+| `POST /vaults/:id/relay-settlements` | | none — pages through every finalized settlement, reconciles individual IDs against Base, settles missing rows, then records delivery hashes |
 | `GET /vaults/:id/escrow-claim-calldata` | | none — returns `claim()` calldata for the wallet to send on Base Sepolia |
 | `GET /platform/stats` | | `get_platform_stats` |
 | `GET /platform/config` | | `get_config` |

@@ -458,9 +458,9 @@ class Settlement:
     by a resolve_claim verdict or a cancel_vault refund. This contract
     never moves real value — it only records who is owed how much from a
     given vault's ObolusEscrow pool on Base Sepolia. The backend relayer
-    polls get_pending_settlements(vault_id), pushes the (recipient, amount)
-    list to ObolusEscrow.settle(), then calls mark_settlements_relayed so
-    the same instruction is never relayed twice. The recipient still has
+    pages through get_settlements_page(vault_id), asks Base settledIds which
+    entitlements were actually delivered, pushes only missing rows to
+    ObolusEscrow.settle(), then records advisory acknowledgments. The recipient has
     to call claim() on the Base contract themselves — this only unlocks
     that ability; it never transfers anything itself."""
     id: u32

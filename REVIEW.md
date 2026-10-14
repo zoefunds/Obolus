@@ -33,8 +33,9 @@ invariants and immutable deployment references are in
 
 ## Verification
 
-- `python3 -m pytest -q tests/direct`: 82 passed.
-- `npm test --prefix backend`: 18 passed, including Solidity compilation.
+- `python3 -m pytest -q tests/direct`: 83 passed.
+- `npm test --prefix backend`: 19 passed, including Solidity compilation.
+- `forge test -vv`: 6 passed, including a real beneficiary token withdrawal.
 - `npm run build --prefix frontend`: production build passed.
 - API, independent authorizer, and frontend production deployments are live.
 - Final deployment addresses and transaction links are recorded in

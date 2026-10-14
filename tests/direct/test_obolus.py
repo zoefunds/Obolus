@@ -1274,6 +1274,28 @@ def test_false_settlement_acknowledgment_is_rejected(vm):
     assert len(c.get_pending_settlements(vid)) == len(ids)
 
 
+def test_full_settlement_index_survives_a_forged_relayer_acknowledgment(vm):
+    """The Base reconciler consumes the complete index, so even a configured
+    relayer writing a fabricated hash cannot make an entitlement undiscoverable."""
+    c = fresh(vm)
+    vid = make_vault(vm, c, window=HOUR, deposit=GEN)
+    cid = open_claim(vm, c, vid)
+    mock_sources(vm)
+    vm.mock_llm(r".*", verdict("DECEASED", "HIGH"))
+    vm.sender = STRANGER
+    warp(vm, NOW + HOUR)
+    c.resolve_claim(cid)
+    original = c.get_settlements_page(vid, 0, 100)
+    ids = [s["id"] for s in original]
+    vm.sender = OWNER
+    c.mark_settlements_relayed(json.dumps(ids), "0x" + "ef" * 32)
+    assert c.get_pending_settlements_page(vid, 0, 100) == []
+    assert c.get_settlements_page(vid, 0, 100) == [
+        {**row, "relayed": True, "base_tx_hash": "0x" + "ef" * 32}
+        for row in original
+    ]
+
+
 def test_high_death_verdict_without_identity_and_provenance_cannot_release(vm):
     c = fresh(vm)
     vid = make_vault(vm, c, window=HOUR, deposit=GEN)
@@ -1296,6 +1318,12 @@ def test_all_twenty_contests_are_accepted_considered_and_refunded(vm):
         url = json.dumps([archived(f"https://proof.example/{idx}")])
         contest(vm, c, cid, vid, urls=url)
     assert len(c.get_contests_for_claim(cid)) == 20
+    contests = c._get_contests_for_claim(cid)
+    aggregated, _image = c._aggregate_contest_evidence(contests)
+    assert len(aggregated) == 20
+    assert set(aggregated) == {
+        archived(f"https://proof.example/{idx}") for idx in range(20)
+    }
     with vm.expect_revert():
         contest(vm, c, cid, vid, urls=json.dumps([archived("https://proof.example/overflow")]))
     mock_sources(vm)

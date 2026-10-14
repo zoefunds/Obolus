@@ -9,6 +9,7 @@ import {
   readConfirmedDeposit,
   isEscrowConfigured,
   buildFailedPaymentRefundCalldata,
+  readAllSettlementCandidates,
 } from "../baseSepolia.js";
 
 export const vaultsRouter = Router();
@@ -193,10 +194,10 @@ vaultsRouter.get("/:id/settlements", async (req, res, next) => {
   }
 });
 
-// POST /vaults/:id/relay-settlements — reads this vault's still-pending
-// GenLayer settlements, pushes them to ObolusEscrow.settle() on Base
-// Sepolia, then marks them relayed back on GenLayer. Safe to call
-// repeatedly (a no-op once nothing is pending) — call this after
+// POST /vaults/:id/relay-settlements — reads this vault's complete finalized
+// GenLayer settlement index, uses Base settledIds/events as delivery truth,
+// pushes missing rows to ObolusEscrow.settle(), then records advisory
+// acknowledgments on GenLayer. Safe to call repeatedly — call this after
 // resolve_claim or cancel_vault so recipients can actually claim their
 // USDC on Base. Deliberately permissionless (like resolve_claim itself) —
 // it only ever relays amounts GenLayer has already recorded, and
@@ -211,7 +212,7 @@ vaultsRouter.post("/:id/relay-settlements", async (req, res, next) => {
       return res.status(503).json({ error: "Escrow relayer is not configured on this server" });
     }
     const vaultId = Number(req.params.id);
-    const pending = await readMethod("get_pending_settlements", [vaultId]);
+    const pending = await readAllSettlementCandidates(readMethod, vaultId);
     if (!pending.length) {
       return res.json({ relayed: 0, txHash: null });
     }
@@ -247,7 +248,7 @@ vaultsRouter.post("/:id/cancel", requireServiceKey, async (req, res, next) => {
 
     if (isEscrowConfigured()) {
       try {
-        const pending = await readMethod("get_pending_settlements", [vaultId]);
+        const pending = await readAllSettlementCandidates(readMethod, vaultId);
         if (pending.length > 0) {
           const { acknowledgments = [] } = await relaySettlementsToEscrow(vaultId, pending);
           for (const acknowledgment of acknowledgments) {

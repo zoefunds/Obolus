@@ -49,7 +49,7 @@ settlement ids, Base replay ids, recipients, amounts, and required status
 
 1. read the authoritative `latest-final` GenLayer state rather than provisional
    validator state;
-2. reproduce the exact pending settlement rows from that finalized state;
+2. reproduce the exact finalized settlement rows that Base reports as unapplied;
 3. reject a recipient, amount, vault, or settlement id mismatch;
 4. verify that the ruling is terminal and eligible for the requested payments;
 5. return a short-lived signature over the digest exposed by
@@ -64,8 +64,9 @@ independent monitoring. The Solidity constructor and rotation methods enforce
 
 The repository includes a separately runnable reference implementation at
 `backend/src/authorizer.js` (`npm run start:authorizer --workspace backend`). It
-uses GenLayer's `latest-final` state variant, retrieves every pending settlement
-through pagination, requires an exact ordered match of ids/recipients/amounts,
+uses GenLayer's `latest-final` state variant, retrieves the complete settlement index
+through pagination, removes only rows whose individual IDs are already applied on Base,
+requires an exact ordered match of the remaining ids/recipients/amounts,
 derives Base replay ids itself, asks the deployed escrow for the authoritative
 digest, and signs it with `SETTLEMENT_AUTHORIZER_PRIVATE_KEY`. Deploy this entry
 point as its own service with an isolated environment and KMS-backed secret;
@@ -78,14 +79,14 @@ not depend on public DNS. The authorizer's HTTP listener is bearer-token protect
 ## Delivery acknowledgment and reconciliation
 
 `mark_settlements_relayed` is restricted to the configured GenLayer relayer,
-requires a valid Base transaction hash, and permanently binds each row to that
-hash. A different hash cannot overwrite an acknowledgment. Base remains the
-source of truth: relays query every individual `settledIds` key before writing.
-An all-applied retry is treated as delivered; a partially overlapping batch is
-halted for item-level reconciliation instead of risking a second allocation.
-GenLayer exposes paginated complete and pending settlement views, so a sweeper
-can rescan all rows and compare them with Base even after an interrupted
-acknowledgment.
+requires a transaction-shaped hash, and permanently binds each row to that hash.
+It is advisory bookkeeping only. Every automatic relay reads the complete finalized
+settlement index—including rows already marked relayed—and queries each individual
+Base `settledIds` key. A fabricated acknowledgment therefore cannot hide an unpaid
+entitlement. Existing `SettlementApplied` events recover the real delivery hash;
+mixed batches acknowledge verified delivered rows and settle only the missing rows.
+Base is the delivery source of truth, and per-entitlement replay protection remains
+the allocation backstop.
 
 For failed funding, the relay always finalizes `void_payment_for_refund` before
 requesting a Base signature. The tombstone is stored independently of a Payment
@@ -117,9 +118,12 @@ authorization independently reads latest-final expected state again.
 
 The verified local release gate is:
 
-- 82 GenLayer Direct Mode tests passing;
-- 18 backend tests passing, including Solidity compilation, finality parsing,
+- 83 GenLayer Direct Mode tests passing;
+- 19 backend tests passing, including Solidity compilation, finality parsing,
   authorizer exact-match checks, overlap/replay handling, and deposit decoding;
+- six executable Foundry tests covering absent owner withdrawal, independent
+  authorization, recipient substitution, replay, allocated-deposit refund rejection,
+  and successful beneficiary USDC withdrawal;
 - a successful Vite production build;
 - `git diff --check` clean;
 - both Fly services healthy and the Vercel production deployment ready.
