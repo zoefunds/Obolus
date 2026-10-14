@@ -133,6 +133,21 @@ contract ObolusEscrowTest {
         escrow.refundFailedPayment(paymentId, deadline, abi.encodePacked(r, s, v));
     }
 
+    function testAuthorizedRefundReturnsOnlyToOriginalPayerOnce() public {
+        bytes32 paymentId = _fund(100);
+        uint256 deadline = block.timestamp + 60;
+        bytes32 digest = escrow.refundAuthorizationDigest(paymentId, deadline);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(AUTHORIZER_KEY, digest);
+        bytes memory signature = abi.encodePacked(r, s, v);
+        vm.prank(payer);
+        escrow.refundFailedPayment(paymentId, deadline, signature);
+        require(usdc.balanceOf(payer) == 1_000_000, "payer not restored");
+        require(usdc.balanceOf(address(escrow)) == 0, "escrow retained refund");
+        vm.expectRevert(bytes("ObolusEscrow: payment already refunded"));
+        vm.prank(payer);
+        escrow.refundFailedPayment(paymentId, deadline, signature);
+    }
+
     function testBeneficiaryCanClaimAuthorizedUSDC() public {
         _fund(100);
         bytes32 ruling = bytes32(uint256(9));

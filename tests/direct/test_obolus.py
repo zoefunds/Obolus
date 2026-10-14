@@ -1309,6 +1309,21 @@ def test_high_death_verdict_without_identity_and_provenance_cannot_release(vm):
     assert c.get_vault(vid)["balance_usdc"] == GEN
 
 
+def test_conflicting_death_and_proof_of_life_evidence_is_inconclusive(vm):
+    c = fresh(vm)
+    vid = make_vault(vm, c, window=HOUR, deposit=GEN)
+    cid = open_claim(vm, c, vid)
+    contest(vm, c, cid, vid, urls=json.dumps([archived("https://registry.example.gov/alive/123")]))
+    mock_sources(vm, body="Conflicting official death notice and later proof-of-life record")
+    vm.mock_llm(r".*", verdict("INSUFFICIENT", "LOW", identity_match="UNCERTAIN", provenance="WEAK"))
+    vm.sender = STRANGER
+    warp(vm, NOW + HOUR)
+    result = c.resolve_claim(cid)
+    assert result["status"] == "INCONCLUSIVE"
+    assert c.get_vault(vid)["status"] == "ACTIVE"
+    assert c.get_vault(vid)["balance_usdc"] == GEN
+
+
 def test_all_twenty_contests_are_accepted_considered_and_refunded(vm):
     c = fresh(vm)
     vid = make_vault(vm, c, window=DAY, deposit=GEN)

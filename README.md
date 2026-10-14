@@ -237,9 +237,9 @@ that parameter has been removed from `create_vault`, `cancel_vault`,
 contracts/obolus.py                      the Intelligent Contract itself (GenVM/Python) — judgment only, value-free
 contracts/base/ObolusEscrow.sol          the real USDC custody/payout contract on Base Sepolia
 examples/estate_planner_example.py       a worked consumer contract integration
-tests/direct/                            83 direct-mode pytest tests on contracts/obolus.py
+tests/direct/                            84 direct-mode pytest tests on contracts/obolus.py
 backend/test/                            node --test coverage for relay, authorizer, and Solidity compilation
-contracts/base/test/                     6 executable Foundry escrow security and withdrawal tests
+contracts/base/test/                     7 executable Foundry escrow security and withdrawal tests
 scripts/deploy.mjs                       deploys the GenLayer contract via genlayer-js
 contracts/base/deploy.js                 deploys ObolusEscrow.sol to Base Sepolia
 backend/                                 Express API, relayer fallback, and Base Sepolia payment relay
@@ -344,9 +344,9 @@ npm install
 # Contract
 genvm-lint check contracts/obolus.py --json
 pip install -r requirements.txt
-pytest tests/direct/ -v          # 83 direct-mode tests
+pytest tests/direct/ -v          # 84 direct-mode tests
 npm test --workspace backend     # 19 relay/authorizer/finality/Solidity tests
-forge test -vv                   # 6 executable escrow security/withdrawal tests
+forge test -vv                   # 7 executable escrow security/withdrawal tests
 
 # Configure
 cp .env.example .env

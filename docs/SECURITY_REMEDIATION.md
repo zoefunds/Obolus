@@ -118,12 +118,12 @@ authorization independently reads latest-final expected state again.
 
 The verified local release gate is:
 
-- 83 GenLayer Direct Mode tests passing;
+- 84 GenLayer Direct Mode tests passing;
 - 19 backend tests passing, including Solidity compilation, finality parsing,
   authorizer exact-match checks, overlap/replay handling, and deposit decoding;
-- six executable Foundry tests covering absent owner withdrawal, independent
+- seven executable Foundry tests covering absent owner withdrawal, independent
   authorization, recipient substitution, replay, allocated-deposit refund rejection,
-  and successful beneficiary USDC withdrawal;
+  successful one-shot failed-deposit refund, and beneficiary USDC withdrawal;
 - a successful Vite production build;
 - `git diff --check` clean;
 - both Fly services healthy and the Vercel production deployment ready.
