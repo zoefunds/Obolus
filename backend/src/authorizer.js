@@ -63,6 +63,27 @@ export function assertExactFinalizedSettlement(payload, finalizedRows) {
   return proposed;
 }
 
+export function assertFinalizedSettlementEligibility(payload, rows, vault, pool) {
+  if (Number(vault.id) !== Number(payload.vaultId)) throw new Error("finalized vault id mismatch");
+  if (!["ACTIVE", "PAYOUT_READY", "CANCELLED"].includes(vault.status)) {
+    throw new Error(`vault status ${vault.status} is not settlement-eligible`);
+  }
+  const total = rows.reduce((sum, row) => sum + BigInt(row.amount_usdc), 0n);
+  const deposited = BigInt(pool.deposited ?? pool[0]);
+  const allocated = BigInt(pool.allocated ?? pool[1]);
+  if (total > deposited - allocated) throw new Error("finalized entitlements exceed unallocated Base deposits");
+  if (vault.status === "PAYOUT_READY" && !rows.some(
+    (row) => ethers.getAddress(row.recipient) === ethers.getAddress(vault.beneficiary) && BigInt(row.amount_usdc) > 0n,
+  )) {
+    throw new Error("confirmed payout has no entitlement for the finalized beneficiary");
+  }
+  if (vault.status === "CANCELLED" && rows.some(
+    (row) => ethers.getAddress(row.recipient) !== ethers.getAddress(vault.grantor),
+  )) {
+    throw new Error("cancelled vault settlement is not payable exclusively to the finalized grantor");
+  }
+}
+
 async function readFinal(functionName, args) {
   return plain(await client.readContract({
     address: CONTRACT_ADDRESS,
@@ -72,10 +93,10 @@ async function readFinal(functionName, args) {
   }));
 }
 
-async function allFinalUnapplied(vaultId, escrow) {
+async function allFinalUnapplied(vaultId, escrow, read = readFinal) {
   const rows = [];
   for (let offset = 0; ; offset += PAGE_SIZE) {
-    const page = await readFinal("get_settlements_page", [Number(vaultId), offset, PAGE_SIZE]);
+    const page = await read("get_settlements_page", [Number(vaultId), offset, PAGE_SIZE]);
     rows.push(...page);
     if (page.length < PAGE_SIZE) break;
   }
@@ -94,11 +115,16 @@ function runtime() {
   return { wallet, escrow };
 }
 
-async function authorizeSettlement(payload, deps) {
+export async function authorizeSettlement(payload, deps) {
   if (payload.requiredGenLayerStatus !== "FINALIZED") throw new Error("FINALIZED status is required");
   if (String(payload.genlayerContract).toLowerCase() !== CONTRACT_ADDRESS.toLowerCase()) throw new Error("wrong GenLayer contract");
   if (String(payload.escrowAddress).toLowerCase() !== ESCROW_ADDRESS.toLowerCase()) throw new Error("wrong Base escrow");
-  const finalRows = await allFinalUnapplied(payload.vaultId, deps.escrow);
+  const read = deps.readFinal || readFinal;
+  const finalRows = await allFinalUnapplied(payload.vaultId, deps.escrow, read);
+  if (finalRows.length === 0) throw new Error("no unapplied finalized entitlement exists");
+  const vault = await read("get_vault", [Number(payload.vaultId)]);
+  const pool = await deps.escrow.getPool(vaultKey(payload.vaultId));
+  assertFinalizedSettlementEligibility(payload, finalRows, vault, pool);
   const rows = assertExactFinalizedSettlement(payload, finalRows);
   const deadline = Math.floor(Date.now() / 1000) + MAX_AUTH_SECONDS;
   const ids = rows.map((row) => row.id);
@@ -115,7 +141,7 @@ async function authorizeSettlement(payload, deps) {
   return { rulingHash, authorizationDeadline: deadline, authorization };
 }
 
-async function authorizeRefund(payload, deps) {
+async function authorizeRefund(payload, deps, { preflight = false } = {}) {
   if (String(payload.escrowAddress).toLowerCase() !== ESCROW_ADDRESS.toLowerCase()) throw new Error("wrong Base escrow");
   const deposit = await deps.escrow.deposits(payload.paymentId);
   if (deposit.refunded) throw new Error("deposit was already refunded");
@@ -124,15 +150,18 @@ async function authorizeRefund(payload, deps) {
       deposit.amount.toString() !== BigInt(payload.amount).toString()) {
     throw new Error("refund request does not match the Base deposit");
   }
-  const voided = await readFinal("is_payment_voided", [payload.paymentId]);
-  if (!voided) throw new Error("payment must have a finalized GenLayer refund tombstone");
   try {
     const payment = await readFinal("get_payment", [payload.paymentId]);
     if (payment.consumed) throw new Error("finalized GenLayer state has consumed this payment");
-    if (!payment.refunded) throw new Error("recorded payment must be voided in finalized GenLayer state before refund");
+    if (!preflight && !payment.refunded) {
+      throw new Error("recorded payment must be voided in finalized GenLayer state before refund");
+    }
   } catch (error) {
     if (!/no payment recorded/i.test(error.message)) throw error;
   }
+  if (preflight) return { approved: true };
+  const voided = await readFinal("is_payment_voided", [payload.paymentId]);
+  if (!voided) throw new Error("payment must have a finalized GenLayer refund tombstone");
   const deadline = Math.floor(Date.now() / 1000) + MAX_AUTH_SECONDS;
   const digest = await deps.escrow.refundAuthorizationDigest(payload.paymentId, deadline);
   return {
@@ -152,7 +181,9 @@ export function createAuthorizerApp(deps = runtime()) {
       if (configured.toLowerCase() !== deps.wallet.address.toLowerCase()) throw new Error("signer is not the escrow authorizer");
       const result = req.body.action === "REFUND_FAILED_PAYMENT"
         ? await authorizeRefund(req.body, deps)
-        : await authorizeSettlement(req.body, deps);
+        : req.body.action === "REFUND_FAILED_PAYMENT_PRECHECK"
+          ? await authorizeRefund(req.body, deps, { preflight: true })
+          : await authorizeSettlement(req.body, deps);
       res.json(result);
     } catch (error) {
       res.status(422).json({ error: error.message });

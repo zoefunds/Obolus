@@ -51,7 +51,7 @@ function compile() {
 }
 
 async function main() {
-  const privateKey = requireEnv("DEPLOYER_PRIVATE_KEY");
+  const privateKey = process.env.DEPLOYER_PRIVATE_KEY || requireEnv("BASE_SEPOLIA_RELAYER_PRIVATE_KEY");
   const rpcUrl = process.env.BASE_SEPOLIA_RPC_URL || "https://sepolia.base.org";
   const usdcAddress =
     process.env.BASE_SEPOLIA_USDC_ADDRESS || "0x036CbD53842c5426634e7929541eC2318f3dCF7e";

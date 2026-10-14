@@ -11,11 +11,20 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { ethers } from "ethers";
 import { OBOLUS_ESCROW_ABI } from "../src/lib/escrowAbi.js";
-import { deriveSettlementId, findConfirmedDeposit, readAllSettlementCandidates, relaySettlementsToEscrow, vaultIdToBytes32 } from "../src/baseSepolia.js";
+import {
+  deriveSettlementId,
+  findConfirmedDeposit,
+  readAllSettlementCandidates,
+  refundIntentMessage,
+  relaySettlementsToEscrow,
+  verifyRefundIntent,
+  vaultIdToBytes32,
+} from "../src/baseSepolia.js";
 
 const ESCROW_ADDRESS = "0x642C8f4De6302D06fC0620efE571dFd69DF94CEA";
 const PAYER = "0x6f0b4ce7a1872db132b2f6b7743defb30eba698a";
 const SMART_ACCOUNT = "0xdb9b1e94b5b69df7e401ddbede43491141047db3";
+const REFUND_ESCROW = "0x642C8f4De6302D06fC0620efE571dFd69DF94CEA";
 
 function fakeContract() {
   const state = { settledIds: new Set(), settleCalls: [], deliveries: new Map() };
@@ -61,6 +70,51 @@ test("deriveSettlementId differs across vaults and settlement sets", () => {
   const c = deriveSettlementId(5, [1, 3]);
   assert.notEqual(a, b);
   assert.notEqual(a, c);
+});
+
+test("failed-payment refund intent must be signed by the original payer", async () => {
+  const payer = new ethers.Wallet(`0x${"11".repeat(32)}`);
+  const attacker = new ethers.Wallet(`0x${"22".repeat(32)}`);
+  const request = {
+    vaultId: 7,
+    txHash: `0x${"aa".repeat(32)}`,
+    paymentId: `0x${"bb".repeat(32)}`,
+  };
+  const deposit = { payer: payer.address, paymentId: request.paymentId, amount: "100" };
+  const message = refundIntentMessage({ ...request, escrowAddress: REFUND_ESCROW });
+  const payerSignature = await payer.signMessage(message);
+  assert.equal(
+    verifyRefundIntent(deposit, { ...request, payerSignature }, REFUND_ESCROW),
+    payer.address,
+  );
+  const attackerSignature = await attacker.signMessage(message);
+  assert.throws(
+    () => verifyRefundIntent(deposit, { ...request, payerSignature: attackerSignature }, REFUND_ESCROW),
+    /not signed by the original payer/,
+  );
+});
+
+test("refund intent signature is bound to vault, deposit tx, payment id, chain, and escrow", async () => {
+  const payer = new ethers.Wallet(`0x${"33".repeat(32)}`);
+  const request = {
+    vaultId: 7,
+    txHash: `0x${"aa".repeat(32)}`,
+    paymentId: `0x${"bb".repeat(32)}`,
+  };
+  const deposit = { payer: payer.address, paymentId: request.paymentId, amount: "100" };
+  const signature = await payer.signMessage(refundIntentMessage({ ...request, escrowAddress: REFUND_ESCROW }));
+  assert.throws(
+    () => verifyRefundIntent(deposit, { ...request, vaultId: 8, payerSignature: signature }, REFUND_ESCROW),
+    /not signed by the original payer/,
+  );
+  assert.throws(
+    () => verifyRefundIntent(deposit, { ...request, txHash: `0x${"cc".repeat(32)}`, payerSignature: signature }, REFUND_ESCROW),
+    /not signed by the original payer/,
+  );
+  assert.throws(
+    () => verifyRefundIntent(deposit, { ...request, paymentId: `0x${"dd".repeat(32)}`, payerSignature: signature }, REFUND_ESCROW),
+    /paymentId does not match/,
+  );
 });
 
 test("relaySettlementsToEscrow calls settle exactly once for a fresh batch", async () => {

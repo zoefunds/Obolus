@@ -9,10 +9,52 @@ import {
   readConfirmedDeposit,
   isEscrowConfigured,
   buildFailedPaymentRefundCalldata,
+  preflightFailedPaymentRefund,
+  refundIntentMessage,
+  verifyRefundIntent,
   readAllSettlementCandidates,
 } from "../baseSepolia.js";
 
 export const vaultsRouter = Router();
+
+/** Ordered refund coordinator. Exported for adversarial tests so the
+ * security-critical rule is executable evidence rather than a route comment:
+ * payer proof and independent read-only preflight must both succeed before
+ * the first irreversible GenLayer mutation. A retry after interruption sees
+ * the finalized tombstone and can obtain fresh Base calldata without writing
+ * it again. */
+export async function prepareFailedPaymentRefund(request, deps) {
+  const { vaultId, txHash, paymentId, payerSignature } = request;
+  const deposit = await deps.readDeposit(vaultId, txHash);
+  deps.verifyIntent(deposit, { vaultId, txHash, paymentId, payerSignature });
+  await deps.preflight(vaultId, txHash, deposit);
+  const alreadyVoided = await deps.isVoided(paymentId);
+  if (!alreadyVoided) await deps.voidPayment(paymentId);
+  return deps.buildCalldata(vaultId, txHash, paymentId, deposit);
+}
+
+// GET /vaults/:id/refund-intent?txHash=...&paymentId=...
+// Returns the exact EIP-191 message the original Base depositor must sign.
+// Read-only: requesting a challenge can never invalidate a payment.
+vaultsRouter.get("/:id/refund-intent", async (req, res, next) => {
+  try {
+    if (!isEscrowConfigured()) return res.status(503).json({ error: "Escrow authorizer is not configured" });
+    const { txHash = "", paymentId = "" } = req.query;
+    if (!txHash || !paymentId) return res.status(400).json({ error: "txHash and paymentId are required" });
+    const vaultId = Number(req.params.id);
+    const deposit = await readConfirmedDeposit(vaultId, txHash);
+    if (deposit.paymentId.toLowerCase() !== String(paymentId).toLowerCase()) {
+      return res.status(400).json({ error: "paymentId does not match the confirmed Base deposit" });
+    }
+    res.json({
+      payer: deposit.payer,
+      paymentId: deposit.paymentId,
+      message: refundIntentMessage({ vaultId, txHash, paymentId: deposit.paymentId }),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
 
 // GET /vaults/:id
 vaultsRouter.get("/:id", async (req, res, next) => {
@@ -25,23 +67,29 @@ vaultsRouter.get("/:id", async (req, res, next) => {
 });
 
 // POST /vaults/:id/refund-failed-payment-calldata
-// body: { txHash, paymentId? }. Returns calldata that only the original
-// Base payer can execute after the independent authorizer confirms the
-// deposit was never successfully consumed by finalized GenLayer state.
+// body: { txHash, paymentId, payerSignature }. The EIP-191 signature proves
+// control of the original Base payer before any irreversible GenLayer write.
+// The independent authorizer then performs a read-only eligibility preflight;
+// only after both checks pass may the relayer finalize the refund tombstone.
 vaultsRouter.post("/:id/refund-failed-payment-calldata", async (req, res, next) => {
   try {
     if (!isEscrowConfigured()) return res.status(503).json({ error: "Escrow authorizer is not configured" });
-    const { txHash, paymentId = "" } = req.body;
-    if (!txHash || !paymentId) return res.status(400).json({ error: "txHash and paymentId are required" });
-    // Always finalize a tombstone before requesting a Base signature, even
-    // when no finalized Payment row exists. That makes any in-flight or
-    // later record_payment for this id fail instead of reviving refunded
-    // USDC as spendable GenLayer credit.
-    const alreadyVoided = await readMethod("is_payment_voided", [paymentId], { finalized: true });
-    if (!alreadyVoided) {
-      await writeMethod("void_payment_for_refund", [paymentId], { finality: "FINALIZED" });
+    const { txHash, paymentId = "", payerSignature = "" } = req.body;
+    if (!txHash || !paymentId || !payerSignature) {
+      return res.status(400).json({ error: "txHash, paymentId, and payerSignature are required" });
     }
-    res.json(await buildFailedPaymentRefundCalldata(Number(req.params.id), txHash, paymentId));
+    const vaultId = Number(req.params.id);
+    res.json(await prepareFailedPaymentRefund(
+      { vaultId, txHash, paymentId, payerSignature },
+      {
+        readDeposit: readConfirmedDeposit,
+        verifyIntent: verifyRefundIntent,
+        preflight: preflightFailedPaymentRefund,
+        isVoided: (id) => readMethod("is_payment_voided", [id], { finalized: true }),
+        voidPayment: (id) => writeMethod("void_payment_for_refund", [id], { finality: "FINALIZED" }),
+        buildCalldata: buildFailedPaymentRefundCalldata,
+      },
+    ));
   } catch (err) {
     next(err);
   }

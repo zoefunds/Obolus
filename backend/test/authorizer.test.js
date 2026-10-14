@@ -1,6 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { assertExactFinalizedSettlement, individualSettlementId } from "../src/authorizer.js";
+import {
+  assertExactFinalizedSettlement,
+  assertFinalizedSettlementEligibility,
+  authorizeSettlement,
+  individualSettlementId,
+} from "../src/authorizer.js";
 
 const A = "0x0000000000000000000000000000000000000001";
 const B = "0x0000000000000000000000000000000000000002";
@@ -47,4 +52,35 @@ test("authorizer rejects omitted or reordered finalized entitlements", () => {
   omitted.amounts.pop();
   assert.throws(() => assertExactFinalizedSettlement(omitted, finalized), /does not exactly match/);
   assert.throws(() => assertExactFinalizedSettlement(payload(), [...finalized].reverse()), /does not exactly match/);
+});
+
+test("authorizer rejects provisional settlement requests before reading or signing", async () => {
+  await assert.rejects(
+    authorizeSettlement({ requiredGenLayerStatus: "ACCEPTED" }, {}),
+    /FINALIZED status is required/,
+  );
+});
+
+test("settlement eligibility rejects nonterminal vault state and unsupported Base value", () => {
+  const p = payload();
+  assert.throws(
+    () => assertFinalizedSettlementEligibility(p, finalized, { id: 7, status: "CLAIM_PENDING", beneficiary: A }, { deposited: 1000n, allocated: 0n }),
+    /not settlement-eligible/,
+  );
+  assert.throws(
+    () => assertFinalizedSettlementEligibility(p, finalized, { id: 7, status: "ACTIVE", beneficiary: A }, { deposited: 299n, allocated: 0n }),
+    /exceed unallocated Base deposits/,
+  );
+});
+
+test("confirmed and cancelled settlements are bound to finalized beneficiary/grantor", () => {
+  const p = payload();
+  assert.throws(
+    () => assertFinalizedSettlementEligibility(p, finalized, { id: 7, status: "PAYOUT_READY", beneficiary: "0x0000000000000000000000000000000000000003" }, { deposited: 1000n, allocated: 0n }),
+    /no entitlement for the finalized beneficiary/,
+  );
+  assert.throws(
+    () => assertFinalizedSettlementEligibility(p, finalized, { id: 7, status: "CANCELLED", grantor: A }, { deposited: 1000n, allocated: 0n }),
+    /not payable exclusively/,
+  );
 });

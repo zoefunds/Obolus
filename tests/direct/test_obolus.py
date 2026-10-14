@@ -803,6 +803,21 @@ def test_all_sources_fetch_failed_does_not_confirm_death(vm):
     assert c.get_vault(vid)["balance_usdc"] == GEN  # untouched
 
 
+def test_submitted_but_unfetched_decisive_source_cannot_confirm_death(vm):
+    """A malicious/incorrect model cannot promote an unavailable submitted
+    URL into decision-critical provenance merely by echoing its URL."""
+    c = fresh(vm)
+    vid = make_vault(vm, c, window=HOUR, deposit=GEN)
+    cid = open_claim(vm, c, vid, now_ts=NOW)
+    vm.strict_mocks = False  # every web fetch fails
+    vm.mock_llm(r".*", verdict("DECEASED", "HIGH"))
+    vm.sender = STRANGER
+    warp(vm, NOW + HOUR)
+    result = c.resolve_claim(cid)
+    assert result["status"] == "INCONCLUSIVE"
+    assert c.get_vault(vid)["balance_usdc"] == GEN
+
+
 def test_empty_llm_output_is_handled_without_crashing_state(vm):
     c = fresh(vm)
     vid = make_vault(vm, c, window=HOUR)
@@ -1349,6 +1364,29 @@ def test_all_twenty_contests_are_accepted_considered_and_refunded(vm):
     # Zero-bond contests create no payment rows, but every one was retained
     # through resolution and none can be silently omitted from storage.
     assert c.get_claim(cid)["contest_count"] == 20
+
+
+def test_second_challenger_image_is_rejected_before_bond_consumption(vm):
+    """GenVM has one challenger-image slot. A later attachment must be
+    rejected explicitly, not accepted and silently omitted, and rejection
+    must happen before consuming its real Base-backed bond payment."""
+    c = fresh(vm, contester_bond=1)
+    vid = make_vault(vm, c, window=DAY, deposit=GEN)
+    cid = open_claim(vm, c, vid)
+    first_image = archived("https://proof.example/first-image")
+    contest(vm, c, cid, vid, bond=1, image_url=first_image)
+
+    second_payment = pay(vm, c, vid, STRANGER, 1)
+    vm.sender = STRANGER
+    with vm.expect_revert():
+        c.contest_claim(
+            cid,
+            json.dumps([archived("https://proof.example/later")]),
+            archived("https://proof.example/later-image"),
+            second_payment,
+        )
+    assert c.get_payment(second_payment)["consumed"] is False
+    assert c.get_claim(cid)["contest_count"] == 1
 
 
 def test_settlement_index_remains_complete_beyond_sixty_four_rows(vm):

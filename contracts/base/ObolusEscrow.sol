@@ -181,6 +181,12 @@ contract ObolusEscrow {
         for (uint256 i = 0; i < amounts.length; i++) {
             require(settlementIds[i] != bytes32(0), "ObolusEscrow: zero settlement id");
             require(!settledIds[settlementIds[i]], "ObolusEscrow: settlement already applied");
+            // settledIds is written only after this validation loop. Without
+            // an intra-batch check, [id, id] would pass both reads and credit
+            // the same signed entitlement twice in one malformed batch.
+            for (uint256 j = 0; j < i; j++) {
+                require(settlementIds[j] != settlementIds[i], "ObolusEscrow: duplicate settlement id");
+            }
             require(recipients[i] != address(0), "ObolusEscrow: zero recipient address");
             total += amounts[i];
         }

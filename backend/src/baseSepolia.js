@@ -105,6 +105,10 @@ async function requestAuthorization(payload) {
   });
   if (!response.ok) throw new Error(`settlement authorizer rejected request (${response.status})`);
   const result = await response.json();
+  if (payload.action === "REFUND_FAILED_PAYMENT_PRECHECK") {
+    if (result.approved !== true) throw new Error("settlement authorizer did not approve refund preflight");
+    return result;
+  }
   if (!result.authorization || !result.authorizationDeadline ||
       (payload.action !== "REFUND_FAILED_PAYMENT" && !result.rulingHash)) {
     throw new Error("settlement authorizer returned an incomplete authorization");
@@ -112,13 +116,36 @@ async function requestAuthorization(payload) {
   return result;
 }
 
-export async function buildFailedPaymentRefundCalldata(vaultId, txHash, expectedPaymentId = "") {
-  const deposit = await readConfirmedDeposit(vaultId, txHash);
-  if (expectedPaymentId && deposit.paymentId.toLowerCase() !== expectedPaymentId.toLowerCase()) {
+export function refundIntentMessage({ vaultId, txHash, paymentId, escrowAddress = ESCROW_ADDRESS, chainId = 84532 }) {
+  if (!escrowAddress) throw new Error("OBOLUS_ESCROW_ADDRESS is not configured");
+  return [
+    "Obolus failed-payment refund authorization",
+    `chainId:${Number(chainId)}`,
+    `escrow:${ethers.getAddress(escrowAddress)}`,
+    `vaultId:${Number(vaultId)}`,
+    `depositTx:${String(txHash).toLowerCase()}`,
+    `paymentId:${String(paymentId).toLowerCase()}`,
+  ].join("\n");
+}
+
+export function verifyRefundIntent(deposit, { vaultId, txHash, paymentId, payerSignature }, escrowAddress = ESCROW_ADDRESS) {
+  if (!payerSignature) throw new Error("payerSignature is required");
+  if (deposit.paymentId.toLowerCase() !== String(paymentId).toLowerCase()) {
     throw new Error("paymentId does not match the confirmed Base deposit");
   }
-  const auth = await requestAuthorization({
-    action: "REFUND_FAILED_PAYMENT",
+  const recovered = ethers.verifyMessage(
+    refundIntentMessage({ vaultId, txHash, paymentId, escrowAddress }),
+    payerSignature,
+  );
+  if (recovered.toLowerCase() !== deposit.payer.toLowerCase()) {
+    throw new Error("refund authorization was not signed by the original payer");
+  }
+  return recovered;
+}
+
+function refundAuthorizationPayload(action, vaultId, txHash, deposit) {
+  return {
+    action,
     escrowAddress: ESCROW_ADDRESS,
     genlayerContract: process.env.VDE_CONTRACT_ADDRESS || null,
     baseDepositTxHash: txHash,
@@ -127,7 +154,19 @@ export async function buildFailedPaymentRefundCalldata(vaultId, txHash, expected
     payer: deposit.payer,
     amount: deposit.amount,
     requiredCondition: "PAYMENT_NOT_RECORDED_OR_NOT_CONSUMED_AFTER_FAILED_FINALIZATION",
-  });
+  };
+}
+
+export async function preflightFailedPaymentRefund(vaultId, txHash, deposit) {
+  return requestAuthorization(refundAuthorizationPayload("REFUND_FAILED_PAYMENT_PRECHECK", vaultId, txHash, deposit));
+}
+
+export async function buildFailedPaymentRefundCalldata(vaultId, txHash, expectedPaymentId = "", depositOverride = null) {
+  const deposit = depositOverride || await readConfirmedDeposit(vaultId, txHash);
+  if (expectedPaymentId && deposit.paymentId.toLowerCase() !== expectedPaymentId.toLowerCase()) {
+    throw new Error("paymentId does not match the confirmed Base deposit");
+  }
+  const auth = await requestAuthorization(refundAuthorizationPayload("REFUND_FAILED_PAYMENT", vaultId, txHash, deposit));
   const iface = new ethers.Interface(OBOLUS_ESCROW_ABI);
   return {
     chain: "base-sepolia",

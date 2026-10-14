@@ -118,6 +118,24 @@ contract ObolusEscrowTest {
         escrow.settle(VAULT, ruling, ids, recipients, amounts, deadline, signature);
     }
 
+    function testDuplicateEntitlementInSameSignedBatchCannotAllocateTwice() public {
+        _fund(200);
+        bytes32 ruling = bytes32(uint256(9));
+        uint256 deadline = block.timestamp + 60;
+        bytes32 duplicate = bytes32(uint256(1));
+        bytes32[] memory ids = new bytes32[](2);
+        address[] memory recipients = new address[](2);
+        uint256[] memory amounts = new uint256[](2);
+        ids[0] = duplicate; ids[1] = duplicate;
+        recipients[0] = beneficiary; recipients[1] = beneficiary;
+        amounts[0] = 100; amounts[1] = 100;
+        bytes memory signature = _authorization(ruling, ids, recipients, amounts, deadline);
+        vm.expectRevert(bytes("ObolusEscrow: duplicate settlement id"));
+        vm.prank(relayer);
+        escrow.settle(VAULT, ruling, ids, recipients, amounts, deadline, signature);
+        require(escrow.getClaimable(VAULT, beneficiary) == 0, "duplicate batch credited recipient");
+    }
+
     function testAllocatedDepositCannotBeRefunded() public {
         bytes32 paymentId = _fund(100);
         bytes32 ruling = bytes32(uint256(9));

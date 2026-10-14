@@ -1105,16 +1105,29 @@ class VerifiableDeceaseEscrow(gl.Contract):
         _require(now_ts <= int(claim.contest_deadline_ts), "contest window has closed")
         _require(int(claim.contest_count) < MAX_CONTESTS_PER_CLAIM, "this claim has reached its contest limit")
 
-        sender = gl.message.sender_address
-        pid = str(payment_id).strip() if payment_id else ""
-        bond = self._consume_payment(pid, int(claim.vault_id), sender) if pid else 0
-        _require(bond >= int(self.min_contester_bond_usdc), "contester bond below minimum")
-
         urls = _parse_urls_json(contest_urls_json, "contest_urls_json", MAX_CONTEST_URLS)
         _require(len(urls) >= 1, "at least one contest URL is required")
         image_url = ""
         if contest_image_url and contest_image_url.strip():
+            # GenVM currently accepts at most two images in one prompt: one
+            # claimant image and one challenger image. Reject (before bond
+            # consumption) a second challenger image instead of accepting a
+            # bonded attachment that resolution would silently ignore. Later
+            # contesters remain free to submit archived text/page evidence.
+            existing_contests = self._get_contests_for_claim(claim_id)
+            _require(
+                not any(bool(c.image_url) for c in existing_contests),
+                "this claim already has its one challenger image slot; submit archived page/text evidence",
+            )
             image_url = _require_committed_url(contest_image_url, "contest_image_url")
+
+        # Consume the real Base-backed bond only after every deterministic
+        # submission check passes. A rejected second image or malformed URL
+        # must not burn an otherwise valid payment attestation.
+        sender = gl.message.sender_address
+        pid = str(payment_id).strip() if payment_id else ""
+        bond = self._consume_payment(pid, int(claim.vault_id), sender) if pid else 0
+        _require(bond >= int(self.min_contester_bond_usdc), "contester bond below minimum")
 
         contest_id = int(self.contest_count) + 1
         self.contest_count = u64(contest_id)
@@ -1382,7 +1395,15 @@ Respond with ONLY a JSON object, no markdown, with exactly these keys:
             else:
                 raw = gl.nondet.exec_prompt(prompt, response_format="json")
             verdict = _parse_verdict_payload(raw)
-            allowed_sources = set(death_urls + contest_urls)
+            # A decisive source must have actually been fetched in this
+            # validator execution. Merely appearing in submitted calldata is
+            # not evidence: unavailable sources are excluded before the
+            # decision-critical identity/provenance fields are canonicalized.
+            allowed_sources = {
+                item["url"]
+                for item in death_evidence + contest_evidence
+                if item.get("ok")
+            }
             verdict["decisive_sources"] = [
                 url for url in verdict["decisive_sources"] if url in allowed_sources
             ]
