@@ -2,11 +2,11 @@
 
 ## Candidates generated (12+, spanning capability areas)
 
-1. **Verifiable Decease Escrow** — releases inherited GEN to a beneficiary only when
+1. **Verifiable Decease Escrow** — releases Base Sepolia USDC to a beneficiary only when
    validator consensus judges real-world evidence (obituaries, registries, news, an
    optional certificate/obituary screenshot) corroborates a named person's death, with a
-   symmetric bonded contest window. *[web fetch + web render/screenshot + native
-   value/escrow]*
+   symmetric bonded contest window. *[web fetch + web render/screenshot + cross-chain
+   USDC escrow]*
 2. Semantic page-diff materiality oracle for watched web pages. *[web]* — **on the
    collision list this cycle, discarded outright.**
 3. Multi-source corroboration / independence-clustering news oracle. *[web]* — **on the
@@ -111,7 +111,7 @@
   counter-submission. No deterministic parser or numeric feed resolves this.
 - **Gate D (reusable primitive):** A consumer estate-planning or DAO-succession
   contract integrates in well under 10 lines — see `examples/estate_planner_example.py`.
-- **Gate E (consequential):** Gates an irreversible native-token payout, and can equally
+- **Gate E (consequential):** Gates an irreversible USDC payout on Base Sepolia, and can equally
   gate a role/permission handoff (e.g., DAO successor admin rights) via the same
   verdict.
 - **Gate F (originality):** Not on this cycle's collision list (page-change materiality;

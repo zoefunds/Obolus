@@ -4,6 +4,7 @@ app = "obolus-api-gideon"
 primary_region = "iad"
 
 [build]
+  dockerfile = "backend/Dockerfile"
 
 [env]
   PORT = "4000"

@@ -6,7 +6,7 @@ import { api } from "../api.js";
 import { sendBaseSepoliaSteps } from "../lib/baseSepoliaWallet.js";
 
 // Payouts moved to Base Sepolia's ObolusEscrow with the USDC migration
-// (see MEMORY.md) — GenLayer only records who is owed what (Settlement
+// (see docs/SECURITY_REMEDIATION.md) — GenLayer only records who is owed what (Settlement
 // rows); the actual USDC transfer is this component's self-serve
 // claim() call straight to ObolusEscrow, signed by the connected wallet.
 // Pass `vaultId` when the caller already knows which vault's payout to

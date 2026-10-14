@@ -47,7 +47,7 @@ if (!account) {
 // writeContract() — see contract.js's writeMethod, which passes the REAL
 // signing account explicitly per call via requireAccount() — never a
 // simulated/mocked account. The contract itself is value-free since the
-// USDC migration (see MEMORY.md): writes carry declared amounts as plain
+// USDC split-chain design (see docs/SECURITY_REMEDIATION.md): writes carry declared amounts as plain
 // arguments, not attached native value.
 export const client = createClient({ chain, account });
 

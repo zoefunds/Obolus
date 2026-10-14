@@ -70,6 +70,10 @@ CONFIDENCE_LOW = "LOW"
 CONFIDENCE_MEDIUM = "MEDIUM"
 CONFIDENCE_HIGH = "HIGH"
 VALID_CONFIDENCES = (CONFIDENCE_LOW, CONFIDENCE_MEDIUM, CONFIDENCE_HIGH)
+IDENTITY_CONFIRMED = "CONFIRMED"
+IDENTITY_UNCERTAIN = "UNCERTAIN"
+PROVENANCE_STRONG = "STRONG"
+PROVENANCE_WEAK = "WEAK"
 
 # Hard limits — generous sanity rails, not artificial scarcity.
 MAX_NAME_LEN = 160
@@ -82,7 +86,7 @@ MAX_CONTEST_URLS = 5
 MAX_EVIDENCE_EXCERPT = 1400   # chars of rendered page fed to the LLM per source
 MAX_REASONING_STORED = 1200
 MAX_VAULTS_PER_ADDRESS = 200   # scan cap, not a hard business limit
-MAX_SETTLEMENTS_PER_VAULT = 64  # scan cap for the relayer sweep, not a business limit
+MAX_SETTLEMENT_PAGE_SIZE = 100
 
 MIN_CONTEST_WINDOW_SECONDS = 3600            # 1 hour floor — always some window
 MAX_CONTEST_WINDOW_SECONDS = 180 * 24 * 3600  # 180 days ceiling — sanity rail
@@ -100,12 +104,12 @@ MAX_CONTESTS_PER_CLAIM = 20
 # contester's evidence from ever reaching resolution. A contest can never
 # be edited or removed, so evidence already on record can never be pushed
 # out by a later submission either.
-MAX_CONTEST_URLS_PER_RESOLUTION = MAX_CONTEST_URLS
+MAX_CONTEST_URLS_PER_RESOLUTION = MAX_CONTESTS_PER_CLAIM
 
 # One resolution attempt fetches at most this many text sources total
 # (death evidence + contest evidence combined) to keep the nondet round
 # bounded and latency predictable.
-MAX_TEXT_SOURCES_PER_RESOLUTION = MAX_EVIDENCE_URLS + MAX_CONTEST_URLS
+MAX_TEXT_SOURCES_PER_RESOLUTION = MAX_EVIDENCE_URLS + MAX_CONTEST_URLS_PER_RESOLUTION
 # At most 2 images total, per GenVM's documented image-input limit: one
 # death-evidence screenshot, one life/contest-evidence screenshot.
 MAX_IMAGES_PER_RESOLUTION = 2
@@ -321,12 +325,24 @@ def _parse_verdict_payload(raw: typing.Any) -> dict:
     reasoning = str(reasoning_raw) if reasoning_raw is not None else ""
     evidence_raw = _first_present(payload, ["evidence_summary", "evidence", "summary"])
     evidence_summary = str(evidence_raw) if evidence_raw is not None else ""
+    identity_match = str(payload.get("identity_match", IDENTITY_UNCERTAIN)).strip().upper()
+    if identity_match not in (IDENTITY_CONFIRMED, IDENTITY_UNCERTAIN):
+        identity_match = IDENTITY_UNCERTAIN
+    provenance = str(payload.get("provenance", PROVENANCE_WEAK)).strip().upper()
+    if provenance not in (PROVENANCE_STRONG, PROVENANCE_WEAK):
+        provenance = PROVENANCE_WEAK
+    decisive_sources_raw = payload.get("decisive_sources", [])
+    decisive_sources = decisive_sources_raw if isinstance(decisive_sources_raw, list) else []
+    decisive_sources = sorted({_truncate(str(x), MAX_URL_LEN) for x in decisive_sources[:10]})
 
     return {
         "determination": determination,
         "confidence": confidence,
         "reasoning": _truncate(reasoning, MAX_REASONING_STORED),
         "evidence_summary": _truncate(evidence_summary, 500),
+        "identity_match": identity_match,
+        "provenance": provenance,
+        "decisive_sources": decisive_sources,
     }
 
 
@@ -431,6 +447,7 @@ class Payment:
     payer: Address           # who actually sent the USDC on Base
     amount_usdc: u256
     consumed: bool
+    refunded: bool
     recorded_ts: u64
 
 
@@ -451,6 +468,7 @@ class Settlement:
     recipient: Address
     amount_usdc: u256
     relayed: bool
+    base_tx_hash: str
     created_ts: u64
 
 
@@ -515,6 +533,11 @@ class VerifiableDeceaseEscrow(gl.Contract):
     # relayer has attested to, keyed by ObolusEscrow's own unique payment
     # id. See the Payment dataclass and _consume_payment. -------------------
     payments: TreeMap[str, Payment]
+    # Finalized refund tombstones are independent of Payment rows. This
+    # closes the race where record_payment is still provisional when a
+    # refund is requested: the tombstone finalizes first, so that pending
+    # or later attestation can never become consumable after Base refunds.
+    voided_payment_ids: TreeMap[str, bool]
 
     # ---- vault storage --------------------------------------------------------
     vault_count: u64
@@ -626,6 +649,7 @@ class VerifiableDeceaseEscrow(gl.Contract):
         payment = self.payments.get(pid)
         _require(payment is not None, "no confirmed payment found for this payment_id — declaration is unpaid")
         _require(not bool(payment.consumed), "payment_id has already been spent")
+        _require(not bool(payment.refunded), "payment_id was voided for a Base refund")
         _require(int(payment.vault_id) == int(expected_vault_id), "payment was not deposited for this vault")
         _require(payment.payer == expected_payer, "payment was deposited by a different participant")
         payment.consumed = True
@@ -662,14 +686,14 @@ class VerifiableDeceaseEscrow(gl.Contract):
             recipient=addr,
             amount_usdc=u256(int(amount)),
             relayed=False,
+            base_tx_hash="",
             created_ts=u64(_chain_now_ts()),
         )
         vid = u32(vault_id)
         if self.vault_settlement_ids.get(vid) is None:
             self.vault_settlement_ids[vid] = []
         arr = self.vault_settlement_ids[vid]
-        if len(arr) < MAX_SETTLEMENTS_PER_VAULT:
-            arr.append(sid)
+        arr.append(sid)
         self.total_paid_out_usdc = u256(int(self.total_paid_out_usdc) + int(amount))
 
     def _record_grantor_vault(self, addr: Address, vault_id: int) -> None:
@@ -784,6 +808,7 @@ class VerifiableDeceaseEscrow(gl.Contract):
             "payer": payment.payer.as_hex,
             "amount_usdc": int(payment.amount_usdc),
             "consumed": bool(payment.consumed),
+            "refunded": bool(payment.refunded),
             "recorded_ts": int(payment.recorded_ts),
         }
 
@@ -794,6 +819,7 @@ class VerifiableDeceaseEscrow(gl.Contract):
             "recipient": settlement.recipient.as_hex,
             "amount_usdc": int(settlement.amount_usdc),
             "relayed": bool(settlement.relayed),
+            "base_tx_hash": settlement.base_tx_hash,
             "created_ts": int(settlement.created_ts),
         }
 
@@ -1273,11 +1299,23 @@ Rules:
 - "confidence" must be one of "LOW", "MEDIUM", "HIGH" — never a number. Use "HIGH" only
   when you would be comfortable if this verdict released real inherited funds
   irreversibly right now.
+- A Wayback timestamp proves only that bytes were captured at a historical time; it does
+  NOT make the original publisher authoritative. Inspect the original host embedded in
+  each archive URL. Set "provenance" to "STRONG" only when decisive evidence comes from
+  an official death registry, government/court record, established news organization,
+  or another independently accountable primary source. Personal pages, arbitrary blogs,
+  screenshots, and self-published notices are "WEAK" unless independently corroborated.
+- Set "identity_match" to "CONFIRMED" only when decision-critical evidence matches this
+  subject using identity-bearing facts beyond a shared name (birth year, aliases,
+  location/family/context, official identifier, or equivalent corroboration).
 
 Respond with ONLY a JSON object, no markdown, with exactly these keys:
 {{
   "determination": "DECEASED" or "ALIVE_OR_REFUTED" or "INSUFFICIENT",
   "confidence": "LOW" or "MEDIUM" or "HIGH",
+  "identity_match": "CONFIRMED" or "UNCERTAIN",
+  "provenance": "STRONG" or "WEAK",
+  "decisive_sources": [archive URLs that actually drove the decision],
   "reasoning": one short paragraph, under 120 words, naming which evidence drove the verdict,
   "evidence_summary": one sentence naming the specific source(s) that mattered most
 }}"""
@@ -1344,6 +1382,13 @@ Respond with ONLY a JSON object, no markdown, with exactly these keys:
             else:
                 raw = gl.nondet.exec_prompt(prompt, response_format="json")
             verdict = _parse_verdict_payload(raw)
+            allowed_sources = set(death_urls + contest_urls)
+            verdict["decisive_sources"] = [
+                url for url in verdict["decisive_sources"] if url in allowed_sources
+            ]
+            if not verdict["decisive_sources"]:
+                verdict["provenance"] = PROVENANCE_WEAK
+                verdict["identity_match"] = IDENTITY_UNCERTAIN
             # Canonical compact JSON — comparative equivalence then compares
             # meaning (determination + confidence band), never bytes/prose.
             return json.dumps(
@@ -1352,6 +1397,9 @@ Respond with ONLY a JSON object, no markdown, with exactly these keys:
                     "confidence": verdict["confidence"],
                     "reasoning": verdict["reasoning"],
                     "evidence_summary": verdict["evidence_summary"],
+                    "identity_match": verdict["identity_match"],
+                    "provenance": verdict["provenance"],
+                    "decisive_sources": verdict["decisive_sources"],
                 },
                 sort_keys=True,
             )
@@ -1360,11 +1408,11 @@ Respond with ONLY a JSON object, no markdown, with exactly these keys:
             "Both results are JSON verdicts judging whether the SAME named real person "
             "has died, given the same death-claim and contest evidence. Treat them as "
             "equivalent ONLY if they agree EXACTLY on the string value of "
-            "'determination' (DECEASED / ALIVE_OR_REFUTED / INSUFFICIENT) AND EXACTLY on "
-            "the string value of 'confidence' (LOW / MEDIUM / HIGH). Differences in the "
+            "'determination', 'confidence', 'identity_match', and 'provenance', and on the "
+            "canonical set of 'decisive_sources'. Differences in the "
             "wording of 'reasoning' or 'evidence_summary', formatting, key order, or "
             "which specific phrases are quoted are irrelevant and do NOT break "
-            "equivalence. A different determination, or a different confidence band, is "
+            "equivalence. A difference in any decision-critical field is "
             "NOT equivalent, even if the reasoning is similar."
         )
 
@@ -1447,7 +1495,11 @@ Respond with ONLY a JSON object, no markdown, with exactly these keys:
         claimant_bond = int(claim.claimant_bond_usdc)
         vault_id = int(vault.id)
 
-        if determination == DETERMINATION_DECEASED and confidence == CONFIDENCE_HIGH:
+        release_authorized = (
+            verdict["identity_match"] == IDENTITY_CONFIRMED
+            and verdict["provenance"] == PROVENANCE_STRONG
+        )
+        if determination == DETERMINATION_DECEASED and confidence == CONFIDENCE_HIGH and release_authorized:
             # --- CONFIRMED: money moves (via Settlement records — see
             # docstring above). Zero the ledger and persist state BEFORE
             # any settlement is recorded, so a re-entrant resolve_claim call
@@ -1533,6 +1585,7 @@ Respond with ONLY a JSON object, no markdown, with exactly these keys:
         self._only_relayer()
         pid = str(payment_id).strip()
         _require(len(pid) > 0, "payment_id must not be empty")
+        _require(not bool(self.voided_payment_ids.get(pid)), "payment_id was voided for a Base refund")
         _require(self.payments.get(pid) is None, "payment_id already recorded — duplicate payment record")
         amount = int(amount_usdc)
         _require(amount > 0, "recorded payment amount must be positive")
@@ -1544,23 +1597,40 @@ Respond with ONLY a JSON object, no markdown, with exactly these keys:
             payer=payer_addr,
             amount_usdc=u256(amount),
             consumed=False,
+            refunded=False,
             recorded_ts=u64(_chain_now_ts()),
         )
+
+    @gl.public.write
+    def void_payment_for_refund(self, payment_id: str) -> None:
+        """Relayer-only, finalized before a Base refund is authorized.
+        Permanently prevents a recorded but unconsumed payment from later
+        funding principal or a bond after its USDC has been returned."""
+        self._only_relayer()
+        pid = str(payment_id).strip()
+        _require(len(pid) > 0, "payment_id must not be empty")
+        payment = self.payments.get(pid)
+        if payment is not None:
+            _require(not bool(payment.consumed), "consumed payments cannot be refunded")
+            payment.refunded = True
+        self.voided_payment_ids[pid] = True
 
     # ========================================================================
     #  PUBLIC WRITE — settlement relay bookkeeping (no value moves here)
     # ========================================================================
 
     @gl.public.write
-    def mark_settlements_relayed(self, settlement_ids_json: str) -> None:
+    def mark_settlements_relayed(self, settlement_ids_json: str, base_tx_hash: str) -> None:
         """Backend relayer calls this after successfully pushing a batch of
         Settlement rows to ObolusEscrow.settle() on Base Sepolia, so the
-        same instruction is never relayed twice. Permissionless bookkeeping
-        only — it flips a `relayed` flag here and never itself moves value,
-        so there is nothing to exploit by calling it early or falsely: the
-        real transfer is gated by ObolusEscrow's own onlyRelayer check and
-        its cumulative-allocation guard on Base Sepolia, not by this flag.
+        same instruction is never relayed twice. This is relayer-only and
+        permanently records the successful Base transaction hash. A caller
+        cannot falsely hide a pending entitlement, and an existing
+        acknowledgment cannot be rebound to a different transaction.
         """
+        self._only_relayer()
+        tx_hash = str(base_tx_hash).strip().lower()
+        _require(bool(re.fullmatch(r"0x[0-9a-f]{64}", tx_hash)), "base_tx_hash must be a 32-byte hex transaction hash")
         try:
             ids = json.loads(settlement_ids_json) if settlement_ids_json else []
         except (json.JSONDecodeError, ValueError, TypeError):
@@ -1569,8 +1639,12 @@ Respond with ONLY a JSON object, no markdown, with exactly these keys:
         for raw_id in ids:
             sid = u32(int(raw_id))
             settlement = self.settlements.get(sid)
-            if settlement is not None:
+            _require(settlement is not None, f"settlement {int(raw_id)} does not exist")
+            if bool(settlement.relayed):
+                _require(settlement.base_tx_hash == tx_hash, "settlement already acknowledged by a different Base transaction")
+            else:
                 settlement.relayed = True
+                settlement.base_tx_hash = tx_hash
 
     # ========================================================================
     #  PUBLIC WRITES — administration
@@ -1670,6 +1744,24 @@ Respond with ONLY a JSON object, no markdown, with exactly these keys:
         return [self._settlement_dict(s) for s in self._get_settlements_for_vault(vault_id)]
 
     @gl.public.view
+    def get_settlements_page(self, vault_id: int, offset: int, limit: int) -> list[dict]:
+        """Complete, bounded settlement discovery for relayers and recipients.
+        No entitlement is dropped after an arbitrary per-vault threshold."""
+        self._get_vault(vault_id)
+        start = max(0, int(offset))
+        page_size = _clamp_int(int(limit), 1, MAX_SETTLEMENT_PAGE_SIZE)
+        rows = self._get_settlements_for_vault(vault_id)
+        return [self._settlement_dict(s) for s in rows[start:start + page_size]]
+
+    @gl.public.view
+    def get_pending_settlements_page(self, vault_id: int, offset: int, limit: int) -> list[dict]:
+        self._get_vault(vault_id)
+        start = max(0, int(offset))
+        page_size = _clamp_int(int(limit), 1, MAX_SETTLEMENT_PAGE_SIZE)
+        rows = [s for s in self._get_settlements_for_vault(vault_id) if not bool(s.relayed)]
+        return [self._settlement_dict(s) for s in rows[start:start + page_size]]
+
+    @gl.public.view
     def get_pending_settlements(self, vault_id: int) -> list[dict]:
         """Subset of get_settlements_for_vault where relayed is still
         False — exactly what the backend relayer's sweep job needs to push
@@ -1692,6 +1784,12 @@ Respond with ONLY a JSON object, no markdown, with exactly these keys:
         if payment is None:
             raise gl.vm.UserError(ERR_EXPECTED + "no payment recorded for this payment_id")
         return self._payment_dict(payment)
+
+    @gl.public.view
+    def is_payment_voided(self, payment_id: str) -> bool:
+        """True only after the relayer's refund tombstone is finalized.
+        This view works whether or not record_payment ever created a row."""
+        return bool(self.voided_payment_ids.get(str(payment_id).strip()))
 
     @gl.public.view
     def is_resolvable(self, claim_id: int) -> bool:

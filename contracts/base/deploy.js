@@ -10,6 +10,7 @@
  *   BASE_SEPOLIA_RPC_URL=https://sepolia.base.org \
  *   BASE_SEPOLIA_USDC_ADDRESS=0x036CbD53842c5426634e7929541eC2318f3dCF7e \
  *   RELAYER_ADDRESS=0x... \
+ *   SETTLEMENT_AUTHORIZER_ADDRESS=0x... \
  *   node contracts/base/deploy.js
  *
  * Requires: npm i -D ethers solc  (in whichever package.json runs this from)
@@ -55,6 +56,7 @@ async function main() {
   const usdcAddress =
     process.env.BASE_SEPOLIA_USDC_ADDRESS || "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
   const relayerAddress = requireEnv("RELAYER_ADDRESS");
+  const authorizerAddress = requireEnv("SETTLEMENT_AUTHORIZER_ADDRESS");
 
   const { abi, bytecode } = compile();
 
@@ -63,14 +65,37 @@ async function main() {
   console.log(`Deploying from ${wallet.address} to ${rpcUrl} ...`);
 
   const factory = new ethers.ContractFactory(abi, bytecode, wallet);
-  const contract = await factory.deploy(usdcAddress, relayerAddress);
+  if (relayerAddress.toLowerCase() === authorizerAddress.toLowerCase()) {
+    throw new Error("RELAYER_ADDRESS and SETTLEMENT_AUTHORIZER_ADDRESS must be different keys");
+  }
+  const contract = await factory.deploy(usdcAddress, relayerAddress, authorizerAddress);
   await contract.waitForDeployment();
 
   const address = await contract.getAddress();
+  const deploymentTx = contract.deploymentTransaction();
+  const receipt = await deploymentTx.wait();
   console.log("ObolusEscrow deployed at:", address);
+  console.log("Deployment transaction:", deploymentTx.hash);
+  console.log("Deployment block:", receipt.blockNumber);
   console.log("\nSet these in backend env / Fly secrets:");
   console.log(`OBOLUS_ESCROW_ADDRESS=${address}`);
+  console.log(`OBOLUS_ESCROW_DEPLOY_BLOCK=${receipt.blockNumber}`);
   console.log(`BASE_SEPOLIA_USDC_ADDRESS=${usdcAddress}`);
+
+  const envPath = path.resolve(__dirname, "../..", ".env");
+  if (fs.existsSync(envPath)) {
+    let env = fs.readFileSync(envPath, "utf8");
+    const setValue = (key, value) => {
+      const line = `${key}=${value}`;
+      env = new RegExp(`^${key}=.*$`, "m").test(env)
+        ? env.replace(new RegExp(`^${key}=.*$`, "m"), line)
+        : `${env.replace(/\n?$/, "\n")}${line}\n`;
+    };
+    setValue("OBOLUS_ESCROW_ADDRESS", address);
+    setValue("OBOLUS_ESCROW_DEPLOY_BLOCK", receipt.blockNumber);
+    fs.writeFileSync(envPath, env);
+    console.log(`Updated ${envPath}`);
+  }
 }
 
 main().catch((err) => {

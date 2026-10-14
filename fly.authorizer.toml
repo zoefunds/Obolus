@@ -1,0 +1,32 @@
+app = "obolus-authorizer-gideon"
+primary_region = "iad"
+
+[build]
+  dockerfile = "backend/Dockerfile"
+
+[env]
+  AUTHORIZER_PORT = "4100"
+  GENLAYER_NETWORK = "studionet"
+
+[http_service]
+  internal_port = 4100
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["authorizer"]
+
+  [[http_service.checks]]
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "10s"
+    method = "GET"
+    path = "/health"
+
+[processes]
+  authorizer = "npm run start:authorizer"
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory = "512mb"

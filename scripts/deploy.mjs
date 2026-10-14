@@ -43,21 +43,22 @@ async function main() {
 
   const contractCode = readFileSync(path.join(root, "contracts", "obolus.py"));
 
-  const minClaimantBondWei = BigInt(process.env.MIN_CLAIMANT_BOND_WEI || "0");
-  const minContesterBondWei = BigInt(process.env.MIN_CONTESTER_BOND_WEI || "0");
+  const minClaimantBondUsdc = BigInt(process.env.MIN_CLAIMANT_BOND_USDC || "0");
+  const minContesterBondUsdc = BigInt(process.env.MIN_CONTESTER_BOND_USDC || "0");
+  const relayerAddress = process.env.GENLAYER_RELAYER_ADDRESS || account.address;
 
   console.log(`Deploying VerifiableDeceaseEscrow to ${networkName} from ${account.address}...`);
 
   const deployTxHash = await client.deployContract({
     code: contractCode,
-    args: [minClaimantBondWei, minContesterBondWei],
+    args: [minClaimantBondUsdc, minContesterBondUsdc, relayerAddress],
   });
 
   const receipt = await client.waitForTransactionReceipt({
     hash: deployTxHash,
-    status: "ACCEPTED",
+    status: "FINALIZED",
     interval: 4000,
-    retries: 90,
+    retries: 900,
   });
 
   const contractAddress = receipt.data?.contract_address ?? receipt.contractAddress;

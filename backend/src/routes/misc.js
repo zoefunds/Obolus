@@ -26,7 +26,7 @@ miscRouter.get("/platform/network", (_req, res) => {
 
 // GET /balances/:address — real, claimable USDC on Base Sepolia's
 // ObolusEscrow (across every vault), not an internal GenLayer ledger — see
-// MEMORY.md, "USDC migration". Call this instead of the old
+// docs/SECURITY_REMEDIATION.md. Call this instead of the old
 // get_balance_of; the money itself moves via the user's own claim()/
 // claimMany() call on ObolusEscrow, never through this backend.
 miscRouter.get("/balances/:address", async (req, res, next) => {

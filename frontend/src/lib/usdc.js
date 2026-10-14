@@ -1,7 +1,7 @@
 // USDC is 6-decimal on Base Sepolia (see contracts/base/ObolusEscrow.sol).
 // Every amount that used to be GEN (18-decimal, native GenLayer value) is
 // now a declared USDC base-unit figure backed by a real deposit on that
-// contract — see MEMORY.md, "USDC migration".
+// contract — see docs/SECURITY_REMEDIATION.md.
 const DECIMALS = 6n;
 const SCALE = 10n ** DECIMALS;
 

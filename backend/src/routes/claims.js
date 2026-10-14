@@ -40,17 +40,16 @@ claimsRouter.get("/:id/resolvable", async (req, res, next) => {
 
 // POST /vaults/:vaultId/claims
 // body: { evidenceUrlsJson, evidenceImageUrl, note, paymentId }
-// paymentId comes from POST /vaults/:vaultId/confirm-payment against a
-// real deposit made via GET /vaults/:vaultId/escrow-fund-calldata — the
-// bond amount is always exactly that attested deposit, never a
-// caller-supplied number. Mounted directly (not on claimsRouter) in
+// For a nonzero configured bond, paymentId comes from
+// POST /vaults/:vaultId/confirm-payment against a real deposit made via
+// GET /vaults/:vaultId/escrow-fund-calldata. It may be empty only when the
+// on-chain minimum bond is zero. Mounted directly (not on claimsRouter) in
 // server.js — see there for why requireServiceKey is applied at the
 // mount site instead of here.
 export const submitClaim = async (req, res, next) => {
   try {
-    const { evidenceUrlsJson, evidenceImageUrl = "", note = "", paymentId } = req.body;
+    const { evidenceUrlsJson, evidenceImageUrl = "", note = "", paymentId = "" } = req.body;
     if (!evidenceUrlsJson) return res.status(400).json({ error: "evidenceUrlsJson is required (JSON array of URLs)" });
-    if (!paymentId) return res.status(400).json({ error: "paymentId is required (see POST /vaults/:vaultId/confirm-payment)" });
 
     const { txHash, receipt } = await writeMethod("submit_death_claim", [
       Number(req.params.vaultId),
@@ -70,9 +69,8 @@ export const submitClaim = async (req, res, next) => {
 // POST /claims/:id/contest  body: { contestUrlsJson, contestImageUrl, paymentId }
 claimsRouter.post("/:id/contest", requireServiceKey, async (req, res, next) => {
   try {
-    const { contestUrlsJson, contestImageUrl = "", paymentId } = req.body;
+    const { contestUrlsJson, contestImageUrl = "", paymentId = "" } = req.body;
     if (!contestUrlsJson) return res.status(400).json({ error: "contestUrlsJson is required (JSON array of URLs)" });
-    if (!paymentId) return res.status(400).json({ error: "paymentId is required (see POST /vaults/:vaultId/confirm-payment)" });
 
     const result = await writeMethod("contest_claim", [
       Number(req.params.id),
@@ -98,7 +96,7 @@ claimsRouter.post("/:id/contest", requireServiceKey, async (req, res, next) => {
 // safely queryable/relayable later via POST /vaults/:vaultId/relay-settlements.
 claimsRouter.post("/:id/resolve", requireServiceKey, async (req, res, next) => {
   try {
-    const result = await writeMethod("resolve_claim", [Number(req.params.id)]);
+    const result = await writeMethod("resolve_claim", [Number(req.params.id)], { finality: "FINALIZED" });
     await invalidate(`claim:${req.params.id}`);
 
     if (isEscrowConfigured()) {
@@ -107,9 +105,9 @@ claimsRouter.post("/:id/resolve", requireServiceKey, async (req, res, next) => {
         const vaultId = Number(claimView.vault_id);
         const pending = await readMethod("get_pending_settlements", [vaultId]);
         if (pending.length > 0) {
-          const { ids } = await relaySettlementsToEscrow(vaultId, pending);
-          if (ids.length > 0) {
-            await writeMethod("mark_settlements_relayed", [JSON.stringify(ids)]);
+          const { acknowledgments = [] } = await relaySettlementsToEscrow(vaultId, pending);
+          for (const acknowledgment of acknowledgments) {
+            await writeMethod("mark_settlements_relayed", [JSON.stringify(acknowledgment.ids), acknowledgment.txHash], { finality: "FINALIZED" });
           }
         }
       } catch (relayErr) {

@@ -126,13 +126,17 @@ def make_vault(
     return vid
 
 
-def verdict(determination, confidence, reasoning="because evidence", summary="source excerpt"):
+def verdict(determination, confidence, reasoning="because evidence", summary="source excerpt",
+            identity_match="CONFIRMED", provenance="STRONG"):
     return json.dumps(
         {
             "determination": determination,
             "confidence": confidence,
             "reasoning": reasoning,
             "evidence_summary": summary,
+            "identity_match": identity_match,
+            "provenance": provenance,
+            "decisive_sources": [archived("https://registry.example.gov/death/123")],
         }
     )
 
@@ -770,7 +774,8 @@ def test_settlements_are_pending_until_marked_relayed(vm):
     assert len(pending) == 1  # beneficiary payout (claimant posted no bond here)
     ids = [s["id"] for s in pending]
 
-    c.mark_settlements_relayed(json.dumps(ids))
+    vm.sender = OWNER
+    c.mark_settlements_relayed(json.dumps(ids), "0x" + "ab" * 32)
     assert c.get_pending_settlements(vid) == []
     relayed = c.get_settlements_for_vault(vid)
     assert all(s["relayed"] for s in relayed)
@@ -1161,6 +1166,54 @@ def test_get_payment_reflects_consumption(vm):
     assert c.get_payment(payment_id)["consumed"] is True
 
 
+def test_refund_void_is_relayer_only_and_permanently_blocks_consumption(vm):
+    c = fresh(vm)
+    vid = make_vault(vm, c, deposit=0)
+    payment_id = pay(vm, c, vid, GRANTOR, GEN)
+    vm.sender = STRANGER
+    with vm.expect_revert():
+        c.void_payment_for_refund(payment_id)
+    vm.sender = OWNER
+    c.void_payment_for_refund(payment_id)
+    assert c.get_payment(payment_id)["refunded"] is True
+    vm.sender = GRANTOR
+    with vm.expect_revert():
+        c.fund_vault(vid, payment_id)
+
+
+def test_consumed_payment_cannot_be_voided_for_refund(vm):
+    c = fresh(vm)
+    vid = make_vault(vm, c, deposit=0)
+    payment_id = pay(vm, c, vid, GRANTOR, GEN)
+    vm.sender = GRANTOR
+    c.fund_vault(vid, payment_id)
+    vm.sender = OWNER
+    with vm.expect_revert():
+        c.void_payment_for_refund(payment_id)
+
+
+def test_refund_tombstone_before_attestation_blocks_late_record_payment(vm):
+    """A refund cannot race an ACCEPTED-but-not-final record_payment.
+    The finalized tombstone exists without a Payment row and makes every
+    later attestation for the refunded Base payment id fail."""
+    c = fresh(vm)
+    vid = make_vault(vm, c, deposit=0)
+    payment_id = "pending-attestation-refund"
+    vm.sender = OWNER
+    c.void_payment_for_refund(payment_id)
+    assert c.is_payment_voided(payment_id) is True
+    with vm.expect_revert():
+        c.record_payment(payment_id, vid, hx(GRANTOR), GEN)
+
+
+def test_refund_tombstone_is_relayer_only_even_without_payment_row(vm):
+    c = fresh(vm)
+    vm.sender = STRANGER
+    with vm.expect_revert():
+        c.void_payment_for_refund("missing-payment")
+    assert c.is_payment_voided("missing-payment") is False
+
+
 # ---------------------------------------------------------------------------
 # Relay-layer scenario: Base settlement succeeds, then the follow-up
 # GenLayer marking call fails and is retried. This is the GenLayer-side
@@ -1169,7 +1222,7 @@ def test_get_payment_reflects_consumption(vm):
 # re-offers an already-relayed row, so a retried relayer sweep can never
 # re-push the same settlement twice from GenLayer's own state. The Base
 # Sepolia half (ObolusEscrow.settledIds rejecting a replayed
-# settlementId) is covered by backend/test/baseSepolia.test.js.
+# individual settlement id) is covered by backend/test/baseSepolia.test.js.
 # ---------------------------------------------------------------------------
 
 def test_mark_settlements_relayed_is_idempotent_after_partial_failure(vm):
@@ -1191,7 +1244,8 @@ def test_mark_settlements_relayed_is_idempotent_after_partial_failure(vm):
     # mark_settlements_relayed call crashed before this ran. A retried
     # sweep calls get_pending_settlements again — still returns the same
     # rows — then this succeeds on retry.
-    c.mark_settlements_relayed(json.dumps(ids))
+    vm.sender = OWNER
+    c.mark_settlements_relayed(json.dumps(ids), "0x" + "cd" * 32)
     assert c.get_pending_settlements(vid) == []
 
     # A second retry of the same mark call (e.g. a naive at-least-once
@@ -1200,5 +1254,75 @@ def test_mark_settlements_relayed_is_idempotent_after_partial_failure(vm):
     # (driven only by resolve_claim's _record_settlement, never by
     # marking) is unchanged.
     total_before = c.get_platform_stats()["total_paid_out_usdc"]
-    c.mark_settlements_relayed(json.dumps(ids))
+    c.mark_settlements_relayed(json.dumps(ids), "0x" + "cd" * 32)
     assert c.get_platform_stats()["total_paid_out_usdc"] == total_before
+
+
+def test_false_settlement_acknowledgment_is_rejected(vm):
+    c = fresh(vm)
+    vid = make_vault(vm, c, window=HOUR, deposit=GEN)
+    cid = open_claim(vm, c, vid)
+    mock_sources(vm)
+    vm.mock_llm(r".*", verdict("DECEASED", "HIGH"))
+    vm.sender = STRANGER
+    warp(vm, NOW + HOUR)
+    c.resolve_claim(cid)
+    ids = [s["id"] for s in c.get_pending_settlements(vid)]
+    vm.sender = STRANGER
+    with vm.expect_revert():
+        c.mark_settlements_relayed(json.dumps(ids), "0x" + "ef" * 32)
+    assert len(c.get_pending_settlements(vid)) == len(ids)
+
+
+def test_high_death_verdict_without_identity_and_provenance_cannot_release(vm):
+    c = fresh(vm)
+    vid = make_vault(vm, c, window=HOUR, deposit=GEN)
+    cid = open_claim(vm, c, vid)
+    mock_sources(vm)
+    vm.mock_llm(r".*", verdict("DECEASED", "HIGH", identity_match="UNCERTAIN", provenance="WEAK"))
+    vm.sender = STRANGER
+    warp(vm, NOW + HOUR)
+    result = c.resolve_claim(cid)
+    assert result["status"] == "INCONCLUSIVE"
+    assert c.get_vault(vid)["balance_usdc"] == GEN
+
+
+def test_all_twenty_contests_are_accepted_considered_and_refunded(vm):
+    c = fresh(vm)
+    vid = make_vault(vm, c, window=DAY, deposit=GEN)
+    cid = open_claim(vm, c, vid)
+    for idx in range(20):
+        warp(vm, NOW + idx + 1)
+        url = json.dumps([archived(f"https://proof.example/{idx}")])
+        contest(vm, c, cid, vid, urls=url)
+    assert len(c.get_contests_for_claim(cid)) == 20
+    with vm.expect_revert():
+        contest(vm, c, cid, vid, urls=json.dumps([archived("https://proof.example/overflow")]))
+    mock_sources(vm)
+    vm.mock_llm(r".*", verdict("INSUFFICIENT", "LOW", identity_match="UNCERTAIN", provenance="WEAK"))
+    vm.sender = STRANGER
+    warp(vm, NOW + DAY)
+    c.resolve_claim(cid)
+    # Zero-bond contests create no payment rows, but every one was retained
+    # through resolution and none can be silently omitted from storage.
+    assert c.get_claim(cid)["contest_count"] == 20
+
+
+def test_settlement_index_remains_complete_beyond_sixty_four_rows(vm):
+    c = fresh(vm, claimant_bond=1, contester_bond=1)
+    vid = make_vault(vm, c, window=HOUR, deposit=GEN)
+    for round_idx in range(4):
+        start = NOW + round_idx * (HOUR + 10)
+        cid = open_claim(vm, c, vid, bond=1, now_ts=start)
+        for idx in range(20):
+            warp(vm, start + idx + 1)
+            contest(vm, c, cid, vid, bond=1, urls=json.dumps([archived(f"https://proof.example/{round_idx}/{idx}")]))
+        mock_sources(vm)
+        vm.mock_llm(r".*", verdict("INSUFFICIENT", "LOW", identity_match="UNCERTAIN", provenance="WEAK"))
+        vm.sender = STRANGER
+        warp(vm, start + HOUR)
+        c.resolve_claim(cid)
+    rows = c.get_settlements_for_vault(vid)
+    assert len(rows) == 84
+    assert len(c.get_settlements_page(vid, 60, 100)) == 24
+    assert len(c.get_pending_settlements_page(vid, 64, 100)) == 20

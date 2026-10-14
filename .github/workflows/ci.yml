@@ -28,7 +28,7 @@ jobs:
         run: pytest tests/direct/ -v
 
   backend:
-    name: Backend install
+    name: Backend tests + Solidity compile
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -37,6 +37,7 @@ jobs:
           node-version: "20"
           cache: "npm"
       - run: npm install --workspace backend
+      - run: npm test --workspace backend
 
   frontend:
     name: Frontend build

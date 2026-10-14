@@ -57,7 +57,7 @@ function extractReturnValue(receipt) {
 }
 
 // GenLayer writes are value-free since the USDC migration (see
-// MEMORY.md) — every declared amount (vault deposits, bonds) is now a
+// docs/SECURITY_REMEDIATION.md) — every declared amount (vault deposits, bonds) is now a
 // plain integer argument, and the real USDC moves separately on Base
 // Sepolia via lib/baseSepoliaWallet.js. This never sends a `value`.
 //

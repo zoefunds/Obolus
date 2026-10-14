@@ -8,6 +8,7 @@ import {
   relaySettlementsToEscrow,
   readConfirmedDeposit,
   isEscrowConfigured,
+  buildFailedPaymentRefundCalldata,
 } from "../baseSepolia.js";
 
 export const vaultsRouter = Router();
@@ -17,6 +18,29 @@ vaultsRouter.get("/:id", async (req, res, next) => {
   try {
     const vault = await cached(`vault:${req.params.id}`, 5, () => readMethod("get_vault", [Number(req.params.id)]));
     res.json(vault);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /vaults/:id/refund-failed-payment-calldata
+// body: { txHash, paymentId? }. Returns calldata that only the original
+// Base payer can execute after the independent authorizer confirms the
+// deposit was never successfully consumed by finalized GenLayer state.
+vaultsRouter.post("/:id/refund-failed-payment-calldata", async (req, res, next) => {
+  try {
+    if (!isEscrowConfigured()) return res.status(503).json({ error: "Escrow authorizer is not configured" });
+    const { txHash, paymentId = "" } = req.body;
+    if (!txHash || !paymentId) return res.status(400).json({ error: "txHash and paymentId are required" });
+    // Always finalize a tombstone before requesting a Base signature, even
+    // when no finalized Payment row exists. That makes any in-flight or
+    // later record_payment for this id fail instead of reviving refunded
+    // USDC as spendable GenLayer credit.
+    const alreadyVoided = await readMethod("is_payment_voided", [paymentId], { finalized: true });
+    if (!alreadyVoided) {
+      await writeMethod("void_payment_for_refund", [paymentId], { finality: "FINALIZED" });
+    }
+    res.json(await buildFailedPaymentRefundCalldata(Number(req.params.id), txHash, paymentId));
   } catch (err) {
     next(err);
   }
@@ -191,9 +215,9 @@ vaultsRouter.post("/:id/relay-settlements", async (req, res, next) => {
     if (!pending.length) {
       return res.json({ relayed: 0, txHash: null });
     }
-    const { txHash, ids } = await relaySettlementsToEscrow(vaultId, pending);
-    if (ids.length > 0) {
-      await writeMethod("mark_settlements_relayed", [JSON.stringify(ids)]);
+    const { txHash, ids, acknowledgments = [] } = await relaySettlementsToEscrow(vaultId, pending);
+    for (const acknowledgment of acknowledgments) {
+      await writeMethod("mark_settlements_relayed", [JSON.stringify(acknowledgment.ids), acknowledgment.txHash], { finality: "FINALIZED" });
     }
     res.json({ relayed: ids.length, txHash });
   } catch (err) {
@@ -218,16 +242,16 @@ vaultsRouter.post("/:id/beneficiary", requireServiceKey, async (req, res, next) 
 vaultsRouter.post("/:id/cancel", requireServiceKey, async (req, res, next) => {
   try {
     const vaultId = Number(req.params.id);
-    const result = await writeMethod("cancel_vault", [vaultId]);
+    const result = await writeMethod("cancel_vault", [vaultId], { finality: "FINALIZED" });
     await invalidate(`vault:${req.params.id}`);
 
     if (isEscrowConfigured()) {
       try {
         const pending = await readMethod("get_pending_settlements", [vaultId]);
         if (pending.length > 0) {
-          const { ids } = await relaySettlementsToEscrow(vaultId, pending);
-          if (ids.length > 0) {
-            await writeMethod("mark_settlements_relayed", [JSON.stringify(ids)]);
+          const { acknowledgments = [] } = await relaySettlementsToEscrow(vaultId, pending);
+          for (const acknowledgment of acknowledgments) {
+            await writeMethod("mark_settlements_relayed", [JSON.stringify(acknowledgment.ids), acknowledgment.txHash], { finality: "FINALIZED" });
           }
         }
       } catch (relayErr) {

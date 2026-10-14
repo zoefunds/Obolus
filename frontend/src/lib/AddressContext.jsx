@@ -8,7 +8,7 @@ import { createWalletClient } from "./genlayerBrowser.js";
 // (window.ethereum) rather than a server-held key. See
 // lib/genlayerBrowser.js for why this works against StudioNet despite
 // genlayer-js's own `connect()` helper claiming only localnet is
-// supported, and MEMORY.md for the full history. `glClient` is that
+// supported, and docs/SECURITY_REMEDIATION.md for the trust model. `glClient` is that
 // signing client; write call sites use it directly (see lib/writes.js).
 const AddressContext = createContext(null);
 

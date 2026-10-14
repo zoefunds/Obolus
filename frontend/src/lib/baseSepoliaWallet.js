@@ -1,7 +1,7 @@
 // Real, user-signed USDC transactions on Base Sepolia from the browser.
 //
 // GenLayer (genlayerBrowser.js) is the adjudication layer only — it never
-// escrows or moves real value (see MEMORY.md, "USDC migration"). Real
+// escrows or moves real value (see docs/SECURITY_REMEDIATION.md). Real
 // USDC custody lives in ObolusEscrow on Base Sepolia, and every write here
 // goes through the SAME injected wallet used for GenLayer writes, just on
 // a different chain. The backend never signs or holds these — it only

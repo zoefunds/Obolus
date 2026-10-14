@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
+    "start:authorizer": "node src/authorizer.js",
     "test": "node --test test/*.test.js",
     "deploy:escrow": "node ../contracts/base/deploy.js"
   },

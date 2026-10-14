@@ -16,12 +16,13 @@ single, high-stakes question: *has this specific named person died?*
 **Live:**
 - App: [obolus-app.vercel.app](https://obolus-app.vercel.app)
 - API: [obolus-api-gideon.fly.dev](https://obolus-api-gideon.fly.dev)
-- GenLayer contract (judgment only, no real value): `0x2712daCEa1b839C1b91F168756F71aDa5065497e`
-  on GenLayer StudioNet
-- ObolusEscrow (real USDC custody): `0x642C8f4De6302D06fC0620efE571dFd69DF94CEA` on Base
-  Sepolia — the payment-binding contract (`fundVault` returns a unique `paymentId`,
-  `settle()` takes a `settlementId` and rejects replays). Superseded
-  `0x1f26b190819BFf558e9FeBdC319ea9D9F1Ad6AD6`; see §9.
+- GenLayer StudioNet contract: [`0xDc11B65794fe7070e1D1357D00d4bCFBa70F7C86`](https://explorer-studio.genlayer.com/address/0xDc11B65794fe7070e1D1357D00d4bCFBa70F7C86)
+- Base Sepolia escrow: [`0x7E5A3F917D5ab0Ce8CbAf11927BDe0830E58924F`](https://sepolia.basescan.org/address/0x7E5A3F917D5ab0Ce8CbAf11927BDe0830E58924F)
+- Base Sepolia USDC: [`0x036CbD53842c5426634e7929541eC2318f3dCF7e`](https://sepolia.basescan.org/address/0x036CbD53842c5426634e7929541eC2318f3dCF7e)
+
+The deployed pair above is empty at publication time. An end-to-end funded test was
+explicitly not run for this release. Deployment transactions and verification details
+are recorded in [`docs/SECURITY_REMEDIATION.md`](docs/SECURITY_REMEDIATION.md).
 
 ---
 
@@ -39,9 +40,9 @@ single, high-stakes question: *has this specific named person died?*
 10. [API reference](#10-api-reference)
 11. [Known limitations](#11-known-limitations)
 
-See [REVIEW.md](REVIEW.md) for a detailed record of the security fixes below (§6, §7,
-§11): committed evidence sources, fair contest-evidence aggregation, and the
-authenticated relayer write surface.
+See [REVIEW.md](REVIEW.md) for the current remediation summary and
+[`docs/SECURITY_REMEDIATION.md`](docs/SECURITY_REMEDIATION.md) for the complete trust
+model, deployment references, test gates, and remaining external CI limitation.
 
 ---
 
@@ -213,13 +214,12 @@ are **append-only** — each submission is stored as its own row
 (`get_contests_for_claim` returns the full list), capped at `MAX_CONTESTS_PER_CLAIM = 20`
 per claim. Nobody, including the original submitter, can edit or overwrite a stored
 contest; a stronger proof-of-life submission already on record can never be silently
-replaced by whoever files next. All stored contests are aggregated and fed into the same
-resolution round (bounded to `MAX_CONTEST_URLS_PER_RESOLUTION` total URLs, shared
-**round-robin across every stored contest** — see `_aggregate_contest_evidence` — so one
-early contest maxing out its own 5-URL submission can't consume the whole budget and
-crowd a later, equally-bonded contester's evidence out of the resolution round entirely),
-and each contester's own bond is routed individually based on the final verdict —
-nobody's stake gets merged into someone else's.
+replaced by whoever files next. All stored contests are aggregated into the same
+resolution round. The contract reserves one URL for every accepted contest before
+filling the remaining contest-evidence capacity, so all 20 bonded contest slots receive
+meaningful consideration and an early five-URL submission cannot exclude a later
+contester. Each contester's bond is routed individually from the final verdict;
+nobody's stake is merged into someone else's.
 
 A dead/unreachable source is **never** treated as evidence of anything — the model is
 explicitly instructed that `FETCH_FAILED` is neutral, not suspicious.
@@ -237,14 +237,13 @@ that parameter has been removed from `create_vault`, `cancel_vault`,
 contracts/obolus.py                      the Intelligent Contract itself (GenVM/Python) — judgment only, value-free
 contracts/base/ObolusEscrow.sol          the real USDC custody/payout contract on Base Sepolia
 examples/estate_planner_example.py       a worked consumer contract integration
-tests/direct/                            74 direct-mode pytest tests on contracts/obolus.py
-backend/test/                            node --test coverage for the Base Sepolia relay logic (baseSepolia.js)
+tests/direct/                            82 direct-mode pytest tests on contracts/obolus.py
+backend/test/                            node --test coverage for relay, authorizer, and Solidity compilation
 scripts/deploy.mjs                       deploys the GenLayer contract via genlayer-js
 contracts/base/deploy.js                 deploys ObolusEscrow.sol to Base Sepolia
-backend/                                 Express API — reads (cached), a relayer-signed write fallback, and the
-                                          Base Sepolia payment relay (confirm-payment, relay-settlements)
+backend/                                 Express API, relayer fallback, and Base Sepolia payment relay
+backend/src/authorizer.js                separately deployed latest-final settlement/refund authorizer
 frontend/                                React + Vite app — writes are signed by the connected wallet
-video/                                   demo video production materials (storyboard, voiceover, on-screen copy)
 ```
 
 ### Split-chain design: GenLayer judges, Base Sepolia holds the money
@@ -266,12 +265,15 @@ a trusted relayer:
   was deposited for *this* vault, and by *this* caller — see §6. This is the fix for the
   prior value-free design, where any caller (including a direct contract call bypassing
   the website) could declare an arbitrary `amount_usdc`/`bond_usdc` backed by no real
-  deposit at all.
+  deposit at all. A finalized refund tombstone is recorded before any failed-payment
+  refund is signed, so an in-flight or later attestation cannot revive refunded USDC.
 - **Payout out (GenLayer → Base):** `resolve_claim`/`cancel_vault` never move value —
   they record `Settlement` rows (who is owed what, from which vault's escrow pool). The
-  backend polls `get_pending_settlements(vault_id)`, pushes the (recipient, amount) list
-  to `ObolusEscrow.settle(vaultId, settlementId, recipients, amounts)`, then calls
-  `mark_settlements_relayed` so the same instruction is never relayed twice. The
+  backend reads paginated latest-final pending settlements. A separately deployed
+  authorizer independently repeats that read and signs the exact ruling hash,
+  per-entitlement replay IDs, recipients, amounts, chain, escrow, and expiry. Only then
+  can the relayer call `ObolusEscrow.settle`; afterward it calls
+  `mark_settlements_relayed(ids, baseTxHash)` at finality. The
   recipient still has to call `claim()`/`claimMany()` on `ObolusEscrow` themselves to
   actually receive the USDC — see §4.
 
@@ -340,8 +342,8 @@ npm install
 # Contract
 genvm-lint check contracts/obolus.py --json
 pip install -r requirements.txt
-pytest tests/direct/ -v          # 74 direct-mode tests on the primitive + the consumer example
-npm test --workspace backend     # backend/test/baseSepolia.test.js — relay logic, no live RPC needed
+pytest tests/direct/ -v          # 82 direct-mode tests
+npm test --workspace backend     # 18 relay/authorizer/finality/Solidity tests
 
 # Configure
 cp .env.example .env
@@ -350,15 +352,18 @@ cp .env.example .env
 # VDE_CONTRACT_ADDRESS (skip this if you're about to deploy your own GenLayer contract),
 # BASE_SEPOLIA_RPC_URL / BASE_SEPOLIA_USDC_ADDRESS / OBOLUS_ESCROW_ADDRESS /
 # BASE_SEPOLIA_RELAYER_PRIVATE_KEY (the Base Sepolia payment layer — see §7; skip
-# OBOLUS_ESCROW_ADDRESS if you're about to deploy your own escrow), REDIS_URL (optional),
-# BACKEND_SERVICE_KEY (only needed if you actually want the relayer write fallback enabled)
+# OBOLUS_ESCROW_ADDRESS if you're about to deploy your own escrow),
+# SETTLEMENT_AUTHORIZER_URL / SETTLEMENT_AUTHORIZER_TOKEN for the relay and a distinct
+# SETTLEMENT_AUTHORIZER_PRIVATE_KEY only in the isolated authorizer service,
+# REDIS_URL (optional), and BACKEND_SERVICE_KEY (only when enabling relay write fallback)
 
 # Deploy your own GenLayer contract instance (writes VDE_CONTRACT_ADDRESS into .env)
 node scripts/deploy.mjs
 
-# Deploy your own ObolusEscrow instance on Base Sepolia (writes nothing automatically —
-# copy the printed address into OBOLUS_ESCROW_ADDRESS yourself)
+# Deploy your own ObolusEscrow instance on Base Sepolia (updates local .env with the
+# deployed address and confirmed deployment block)
 DEPLOYER_PRIVATE_KEY=... BASE_SEPOLIA_RPC_URL=... RELAYER_ADDRESS=0x... \
+  SETTLEMENT_AUTHORIZER_ADDRESS=0x... \
   node contracts/base/deploy.js
 
 # Backend — http://localhost:4000
@@ -377,7 +382,9 @@ need a Base Sepolia wallet with test USDC (`BASE_SEPOLIA_USDC_ADDRESS`) and ETH 
 
 ## 9. Deployment
 
-The live instance runs on Fly.io (backend) and Vercel (frontend):
+The live instance runs as two isolated Fly.io services (relay API and authorizer) plus
+the Vercel frontend. Generate separate relay and authorizer keys; the Solidity deploy
+rejects using the same address for both roles.
 
 ```bash
 # Backend — Fly.io, 2 machines, never scales to zero (fly.toml:
@@ -390,10 +397,25 @@ flyctl secrets set \
   BASE_SEPOLIA_USDC_ADDRESS=0x036CbD53842c5426634e7929541eC2318f3dCF7e \
   OBOLUS_ESCROW_ADDRESS=0x... \
   BASE_SEPOLIA_RELAYER_PRIVATE_KEY=0x... \
+  SETTLEMENT_AUTHORIZER_URL=http://<authorizer-app>.internal:4100/authorize \
+  SETTLEMENT_AUTHORIZER_TOKEN=<shared-random-token> \
   REDIS_URL=rediss://... \
   BACKEND_SERVICE_KEY=$(openssl rand -hex 32) \
   --app <your-app-name>
 flyctl deploy --config fly.toml --dockerfile backend/Dockerfile --app <your-app-name>
+
+# Independent authorizer — a different Fly app and private key. The relay reaches it
+# over Fly's private .internal network; the bearer token remains mandatory.
+flyctl apps create <authorizer-app>
+flyctl secrets set \
+  VDE_CONTRACT_ADDRESS=0x... \
+  OBOLUS_ESCROW_ADDRESS=0x... \
+  BASE_SEPOLIA_RPC_URL=https://sepolia.base.org \
+  SETTLEMENT_AUTHORIZER_PRIVATE_KEY=0x... \
+  SETTLEMENT_AUTHORIZER_TOKEN=<same-shared-random-token> \
+  --app <authorizer-app>
+flyctl deploy --config fly.authorizer.toml --dockerfile backend/Dockerfile \
+  --app <authorizer-app>
 
 # Frontend — Vercel; frontend/vercel.json rewrites /api/* to the Fly backend
 # server-side, so the browser never makes a cross-origin call for reads
@@ -401,16 +423,10 @@ cd frontend
 vercel --prod
 ```
 
-**Current live deployment state, as of the payment-binding milestone
-([v1-milestone-review.md](v1-milestone-review.md)):** both contracts are redeployed and
-live. The GenLayer contract is at `0x2712daCEa1b839C1b91F168756F71aDa5065497e`, running
-the current payment-binding code (verified live via `get_config`). `ObolusEscrow.sol`
-on Base Sepolia is at `0x642C8f4De6302D06fC0620efE571dFd69DF94CEA`, matching the
-backend's ABI (`backend/src/lib/escrowAbi.js`) — `fundVault` returns a `paymentId` and
-`settle()` takes and dedupes a `settlementId`. Both addresses are set in `backend/.env`
-and as Fly secrets on `obolus-api-gideon`; the superseded pre-payment-binding addresses
-(`0x396865B47A0311C0254dC7B12c5Ed30683235AcE` GenLayer,
-`0x1f26b190819BFf558e9FeBdC319ea9D9F1Ad6AD6` escrow) are dead.
+The currently configured addresses and immutable deployment references are listed at
+the top of this README and in
+[`docs/SECURITY_REMEDIATION.md`](docs/SECURITY_REMEDIATION.md). The API's
+`GET /platform/network` endpoint is the runtime source of truth for clients.
 
 Two Vercel settings worth knowing if you fork this: **Deployment Protection (SSO)** is
 on by default for team-scoped projects and will 302 every request, including custom
@@ -424,12 +440,9 @@ Production process resilience for the backend (`npm run backend:prod`) uses `pm2
 `server.js`'s own `uncaughtException`/`unhandledRejection` handlers that keep the process
 serving through a stray rejected promise.
 
-**A note on the exact deployment history, bugs found, and why specific choices were
-made** (the StudioNet chain-config bug that silently dropped every write, the
-`FINALIZED` vs `ACCEPTED` wait-status bug, the `.env` path resolution issue under pm2,
-etc.) lives in [MEMORY.md](MEMORY.md) — worth reading before changing anything in
-`backend/src/chains.js`, `backend/src/genlayerClient.js`, or
-`frontend/src/lib/genlayerBrowser.js`.
+Current production addresses, operational invariants, and the release procedure live
+in [MEMORY.md](MEMORY.md). Security rationale and immutable deployment references live
+in [`docs/SECURITY_REMEDIATION.md`](docs/SECURITY_REMEDIATION.md).
 
 ## 10. API reference
 
@@ -441,10 +454,14 @@ etc.) lives in [MEMORY.md](MEMORY.md) — worth reading before changing anything
 **GenLayer contract views**: `get_vault`, `get_vault_count`, `get_claim`,
 `get_contests_for_claim`, `get_claims_for_vault`, `get_vaults_for_grantor`,
 `get_vaults_for_beneficiary`, `get_settlements_for_vault`, `get_pending_settlements`,
-`get_payment`, `is_resolvable`, `get_platform_stats`, `get_config`.
+`get_settlements_page`, `get_pending_settlements_page`, `get_payment`,
+`is_payment_voided`, `is_resolvable`, `get_platform_stats`, `get_config`.
 
-**ObolusEscrow (Base Sepolia) writes**: `fundVault`, `settle` (relayer-only), `claim`,
-`claimMany`, `setRelayer`/`transferOwnership`/`withdrawUnallocated` (owner-only).
+**ObolusEscrow (Base Sepolia) writes**: `fundVault`, `settle` (relayer plus an
+independent finalized-ruling authorization), `refundFailedPayment` (original payer
+plus independent authorization), `claim`, `claimMany`, `setRelayer`,
+`rotateSettlementAuthorizer` (current authorizer only), and `transferOwnership`.
+There is no owner withdrawal and the owner cannot seize the authorizer role.
 **ObolusEscrow views**: `getPool`, `getClaimable`.
 
 Full docstrings live in [`contracts/obolus.py`](contracts/obolus.py). `get_claim`'s
@@ -464,6 +481,7 @@ with `get_contests_for_claim` / `GET /claims/:id/contests`.
 | `POST /vaults` | `{ beneficiary, subjectName, subjectAkaJson, subjectBirthYear, contestWindowSeconds }` | `create_vault` (metadata only — vault starts at balance 0) |
 | `GET /vaults/:id/escrow-fund-calldata?amountUsdc=N` | | none — returns `approve` + `fundVault` calldata for the wallet to send on Base Sepolia |
 | `POST /vaults/:id/confirm-payment` | `{ txHash }` (of the Base Sepolia deposit) | `record_payment`, after reading the confirmed `Deposited` event itself |
+| `POST /vaults/:id/refund-failed-payment-calldata` | `{ txHash, paymentId }` | finalizes `void_payment_for_refund`, then returns payer-only Base refund calldata with independent authorization |
 | `POST /vaults/:id/fund` | `{ paymentId }` | `fund_vault` |
 | `POST /vaults/:id/beneficiary` | `{ newBeneficiary }` | `set_beneficiary` |
 | `POST /vaults/:id/cancel` | | `cancel_vault` (+ auto-relays any resulting settlement) |
@@ -518,4 +536,5 @@ deliberately permissionless — see §7 for why that's safe.
   specific gap the review flagged (content changing between submission and resolution),
   it doesn't make every archived source trustworthy — the LLM verdict still has to weigh
   source credibility (a named registry vs. an anonymous blog) the same way it always did.
-  See [REVIEW.md](REVIEW.md) §1.
+  See the evidence and consensus section in
+  [`docs/SECURITY_REMEDIATION.md`](docs/SECURITY_REMEDIATION.md).

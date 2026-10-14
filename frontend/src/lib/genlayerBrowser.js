@@ -57,13 +57,33 @@ export async function walletWriteContract(walletClient, { address, functionName,
   // the app, which would otherwise silently sign against the wrong chain.
   await ensureStudioNetwork();
   const txHash = await walletClient.writeContract({ address, functionName, args, value, account: walletClient.account });
-  // ACCEPTED, not FINALIZED — see backend/src/contract.js's writeMethod for
-  // why. interval/retries mirror confirmed-working values from a prior
-  // StudioNet integration.
+  // Every write waits through authoritative finality. Even bookkeeping
+  // operations can consume a payment id, change a beneficiary, or become
+  // evidence for a later Base allocation; treating ACCEPTED as durable made
+  // the UI race provisional state and could misreport failed GenVM execution.
   // fullTransaction: true is required to get the leader receipt's raw
   // return-value bytes back (genlayer-js strips them from the default
   // "simplified" receipt, leaving only a human-readable string) — see
   // lib/writes.js's extractReturnValue, which needs those raw bytes to
   // decode a written call's actual return value (e.g. the new vault id).
-  return walletClient.waitForTransactionReceipt({ hash: txHash, status: "ACCEPTED", interval: 4000, retries: 90, fullTransaction: true });
+  const receipt = await walletClient.waitForTransactionReceipt({
+    hash: txHash,
+    status: "FINALIZED",
+    interval: 4000,
+    retries: 900,
+    fullTransaction: true,
+  });
+  const rawStatus = receipt?.statusName ?? receipt?.status ?? receipt?.consensusStatus;
+  const status = String(rawStatus === 7 || rawStatus === "7" ? "FINALIZED" : rawStatus || "").toUpperCase();
+  const leaders = receipt?.consensus_data?.leader_receipt ?? receipt?.consensusData?.leaderReceipt ?? [];
+  const leader = Array.isArray(leaders) ? leaders[0] : leaders;
+  const execution = String(leader?.execution_result ?? leader?.executionResult ?? "").toUpperCase();
+  const resultStatus = String(leader?.result?.status ?? "").toLowerCase();
+  if (status !== "FINALIZED" || execution !== "SUCCESS" || resultStatus !== "return") {
+    throw new Error(
+      `GenLayer transaction ${txHash} did not finalize with successful GenVM execution ` +
+      `(status: ${status || "UNKNOWN"}, execution: ${execution || "UNKNOWN"}, result: ${resultStatus || "UNKNOWN"})`,
+    );
+  }
+  return receipt;
 }
