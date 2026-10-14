@@ -162,7 +162,10 @@ export function createAuthorizerApp(deps = runtime()) {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  createAuthorizerApp().listen(PORT, "0.0.0.0", () => {
+  // Fly's private .internal DNS resolves to the machine's IPv6 address.
+  // Binding only 0.0.0.0 makes public proxy health checks pass while
+  // direct relay-to-authorizer traffic is refused.
+  createAuthorizerApp().listen(PORT, "::", () => {
     console.log(`Obolus settlement authorizer listening on ${PORT}`);
   });
 }

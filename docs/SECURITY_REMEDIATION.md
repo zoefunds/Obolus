@@ -129,9 +129,9 @@ The verified local release gate is:
 - both Fly services healthy and the Vercel production deployment ready.
 
 Read-only production checks on 2026-10-14 confirmed that the API and frontend both
-advertise the deployment addresses above; the GenLayer platform counters were all
-zero; the Base escrow had zero USDC, `paymentNonce == 0`, and the expected owner,
-relayer, authorizer, and USDC addresses. The optimized Solidity runtime matched the
+advertise the deployment addresses above and that the escrow has the expected owner,
+relayer, authorizer, and USDC addresses. Before the funded E2E, the GenLayer platform
+counters and Base escrow balance were zero. The optimized Solidity runtime matched the
 deployed Base bytecode after substituting the compiler's immutable-USDC locations;
 both runtime hashes were
 `0x0c7cf5395bb11aa32353ffdeb0c83bfecddeb74e5ff71384e0e731ea257dad02`.
@@ -149,11 +149,33 @@ The most recent hosted run could not start because GitHub reports an account-lev
 billing lock. That external account state cannot be repaired in repository source;
 the workflow itself is present and the equivalent commands pass locally.
 
-## Transaction evidence scope
+## Funded public-chain end-to-end evidence
 
-The deployment transactions above are verified and link directly to both
-explorers. At the user's direction, no funded end-to-end transaction was run on
-the final deployment. Accordingly, this document does not claim deposit,
-attestation, adjudication, allocation, acknowledgment, or withdrawal hashes for
-the final pair. The Base escrow was freshly deployed and left empty; no synthetic
-or unrelated transaction references are presented as end-to-end evidence.
+On 2026-10-14, vault 3 and claim 1 completed the full lifecycle using the final
+deployment pair. The subject was James Earl Carter Jr. (Jimmy Carter, born 1924),
+and the adjudication fetched the archived official Carter Center death announcement.
+The one-hour contest window closed before resolution; no contest was submitted.
+
+| Stage | Final public reference | Verified result |
+|---|---|---|
+| Create vault 3 | [StudioNet `0x6aa5…8cbf`](https://explorer-studio.genlayer.com/tx/0x6aa5bd8776702bf08e16e34d512a3a62a12abde1c83b08ab9738dd5f8ff38cbf) | distinct grantor and beneficiary; 3,600-second contest window |
+| Deposit 0.10 USDC | [Base `0x10f5…05ac`](https://sepolia.basescan.org/tx/0x10f5fb786c6858710e4affe5ff82047dd911b81f0a3fa24a44b5befd9b3405ac) | payment `0xb0cb0029c3b4a3dacd384c5cec6d1fd213e88ff7f47cc11f1b9bbf418a543034`; payer 5.85→5.75 USDC; escrow 0→0.10 USDC |
+| Attest payment | [StudioNet `0x5d2e…30f2`](https://explorer-studio.genlayer.com/tx/0x5d2e7d88c7962900702aac16909bfcf1ddb7f73d85ff26df1fe79aedc26030f2) | relayer bound the Base payment id, vault, payer, and 100,000-unit amount |
+| Fund vault | [StudioNet `0x7577…c455`](https://explorer-studio.genlayer.com/tx/0x75773d66b55153f1c9d44c9c4a40f951ff1cae4acdc06c4d36cb576b6ebcc455) | finalized ledger balance became 100,000 units; payment consumed once |
+| Submit claim | [StudioNet `0xc567…a28a`](https://explorer-studio.genlayer.com/tx/0xc567b892ee0b56b0b647d745e38ba2ae66e9707e1db5aee5e9585388e2ada28a) | claim 1 opened with the archived primary-source evidence |
+| Resolve claim | [StudioNet `0xf2fd…d338`](https://explorer-studio.genlayer.com/tx/0xf2fd52fbd6ba8fe6b01d07f029156cb7cfc9107b7e4f968f319bb19eb21bd338) | finalized GenVM success; `DECEASED`, `HIGH`, claim `CONFIRMED`; vault `PAYOUT_READY` |
+| Authorize and allocate | [Base `0x9860…027d`](https://sepolia.basescan.org/tx/0x986008b421a9f331160814533c3de204f666d88660916dea11ea6e638032027d) | independent authorizer signed the exact finalized entitlement; recipient credit became 100,000 units; GenLayer acknowledgment records this Base hash |
+| Beneficiary withdrawal | [Base `0x358a…3549`](https://sepolia.basescan.org/tx/0x358a99edfacd21c6a89b65782b4206b65ee7c93fd96e9c3e313bd21691843549) | beneficiary 0→0.10 USDC; escrow 0.10→0 USDC; remaining claimable balance 0 |
+
+Final cross-chain reads confirmed vault 3 has zero GenLayer ledger balance and one
+relayed 100,000-unit settlement, Base reports 100,000 deposited / 100,000 allocated,
+the beneficiary owns 100,000 USDC base units, and the escrow holds zero. These are
+transactions from the final configured contracts, not synthetic or unrelated links.
+
+The recovery path was also exercised during setup after an incorrect vault identifier
+prevented GenLayer funding: Base transaction
+[`0x1520…e805`](https://sepolia.basescan.org/tx/0x1520b8408e8b91f18ea2025421a6fe652e2c5260e7541ddd5f3d1a05e53ae805)
+returned the unconsumed 100,000-unit deposit to its original payer only after the
+finalized GenLayer refund tombstone and independent authorization. That run exposed
+and led to correction of the authorizer's Fly private-network listener: it now binds
+IPv6 (`::`), matching `.internal` service discovery.

@@ -42,5 +42,12 @@ transactions, trust boundaries, and release verification.
    rewrite.
 7. Update README and the security remediation record with real explorer links.
 
-The final Base deployment is intentionally empty. No funded end-to-end test was
-performed after the user requested that testing stop.
+## Funded production E2E
+
+Vault 3 / claim 1 completed the entire public-chain lifecycle on 2026-10-14.
+The payer deposited 100,000 USDC base units, the finalized GenLayer verdict was
+`DECEASED` / `HIGH` / `CONFIRMED`, Base allocated the exact entitlement, and the
+distinct beneficiary withdrew all 100,000 units. The escrow has zero token balance
+and zero remaining beneficiary credit; its vault pool records 100,000 deposited and
+100,000 allocated. Exact immutable links are in
+[`docs/SECURITY_REMEDIATION.md`](docs/SECURITY_REMEDIATION.md).

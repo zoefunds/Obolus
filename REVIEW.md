@@ -38,9 +38,14 @@ invariants and immutable deployment references are in
 - `forge test -vv`: 7 passed, including refund and beneficiary token transfers.
 - `npm run build --prefix frontend`: production build passed.
 - API, independent authorizer, and frontend production deployments are live.
+- A funded public-chain E2E completed on vault 3 / claim 1: the payer deposited
+  0.10 test USDC, StudioNet finalized a consensus-backed `CONFIRMED` ruling,
+  the independent authorizer approved the exact entitlement, and the beneficiary
+  withdrew the full 0.10 USDC. The public transaction links and balance deltas
+  are recorded in [`docs/SECURITY_REMEDIATION.md`](docs/SECURITY_REMEDIATION.md).
 - Final deployment addresses and transaction links are recorded in
   [`docs/SECURITY_REMEDIATION.md`](docs/SECURITY_REMEDIATION.md).
 
-At the user's direction, no funded end-to-end test was run against the final
-empty deployment. GitHub-hosted jobs remain subject to the repository owner's
-account-level billing lock; equivalent workflow commands pass locally.
+GitHub-hosted jobs remain subject to the repository owner's account-level billing
+lock; equivalent workflow commands pass locally. This is the only outstanding
+external infrastructure limitation and is not a source-code or deployment failure.

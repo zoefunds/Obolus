@@ -20,9 +20,12 @@ single, high-stakes question: *has this specific named person died?*
 - Base Sepolia escrow: [`0x7E5A3F917D5ab0Ce8CbAf11927BDe0830E58924F`](https://sepolia.basescan.org/address/0x7E5A3F917D5ab0Ce8CbAf11927BDe0830E58924F)
 - Base Sepolia USDC: [`0x036CbD53842c5426634e7929541eC2318f3dCF7e`](https://sepolia.basescan.org/address/0x036CbD53842c5426634e7929541eC2318f3dCF7e)
 
-The deployed pair above is empty at publication time. An end-to-end funded test was
-explicitly not run for this release. Deployment transactions and verification details
-are recorded in [`docs/SECURITY_REMEDIATION.md`](docs/SECURITY_REMEDIATION.md).
+The deployed pair has completed a funded public-chain end-to-end test: 0.10 test USDC
+was deposited by the grantor, attested on finalized StudioNet state, adjudicated from
+archived Carter Center evidence, independently authorized and allocated on Base
+Sepolia, then withdrawn by a distinct beneficiary wallet. Exact transaction links,
+balance deltas, and verification details are recorded in
+[`docs/SECURITY_REMEDIATION.md`](docs/SECURITY_REMEDIATION.md).
 
 ---
 
