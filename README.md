@@ -26,6 +26,8 @@ were distinct; 0.12 test USDC entered escrow as principal and bonds, StudioNet
 finalized a consensus-backed `CONFIRMED` ruling, Base allocated three individually
 replay-protected entitlements, and both recipients withdrew. Exact transaction links
 and balance deltas are in [`docs/SECURITY_REMEDIATION.md`](docs/SECURITY_REMEDIATION.md).
+The verified remediation source and E2E harness are recorded at
+[`2f4c481`](https://github.com/zoefunds/Obolus/commit/2f4c481bf33d1013bd4107cdea29505ef9db2f45).
 
 The complete remediation change set starts at commit
 [`fa5a9e9`](https://github.com/zoefunds/Obolus/commit/fa5a9e9c55dce069969ec46e8cb95dd9b71fcebb);

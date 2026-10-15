@@ -1,4 +1,4 @@
-# Security review response — October 14, 2026
+# Security review response — October 15, 2026
 
 This is the current response to the custody, authorization, finality, refund,
 evidence-fairness, indexing, replay, testing, and deployment findings. Detailed
@@ -82,6 +82,10 @@ with a live branch comparison at
 - Final deployment addresses and transaction links are recorded in
   [`docs/SECURITY_REMEDIATION.md`](docs/SECURITY_REMEDIATION.md).
 
-GitHub-hosted jobs remain subject to the repository owner's account-level billing
-lock; equivalent workflow commands pass locally. This is the only outstanding
-external infrastructure limitation and is not a source-code or deployment failure.
+The verified remediation and funded-E2E source is commit
+[`2f4c481`](https://github.com/zoefunds/Obolus/commit/2f4c481bf33d1013bd4107cdea29505ef9db2f45).
+Its [GitHub Actions run](https://github.com/zoefunds/Obolus/actions/runs/38659018242)
+could not start any job because the repository owner's account remains locked for a
+billing issue. Equivalent contract, backend, Solidity, and frontend commands pass
+locally. This is the only outstanding external infrastructure limitation and is not
+a source-code or deployment failure.

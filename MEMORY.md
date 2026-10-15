@@ -16,6 +16,9 @@ addresses and obsolete interfaces were removed to avoid accidental reuse.
 See [`docs/SECURITY_REMEDIATION.md`](docs/SECURITY_REMEDIATION.md) for deploy
 transactions, trust boundaries, and release verification.
 
+Verified remediation source and funded-E2E evidence commit:
+[`2f4c481`](https://github.com/zoefunds/Obolus/commit/2f4c481bf33d1013bd4107cdea29505ef9db2f45).
+
 ## Non-negotiable invariants
 
 - GenLayer is the adjudication ledger; Base Sepolia is the only USDC custodian.

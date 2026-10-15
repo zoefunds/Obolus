@@ -188,9 +188,10 @@ phase could not start because the local tool installation lacks its packaged
 failure, not represented as a contract validation pass.
 
 GitHub Actions contains the same contract, backend, Solidity, and frontend jobs.
-The most recent hosted run could not start because GitHub reports an account-level
-billing lock. That external account state cannot be repaired in repository source;
-the workflow itself is present and the equivalent commands pass locally.
+The [run for verified remediation commit `2f4c481`](https://github.com/zoefunds/Obolus/actions/runs/38659018242)
+could not start any job because GitHub reports an account-level billing lock. That
+external account state cannot be repaired in repository source; the workflow itself
+is present and the equivalent commands pass locally.
 
 ## Current corrected-deployment funded E2E
 
