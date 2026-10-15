@@ -16,16 +16,16 @@ single, high-stakes question: *has this specific named person died?*
 **Live:**
 - App: [obolus-app.vercel.app](https://obolus-app.vercel.app)
 - API: [obolus-api-gideon.fly.dev](https://obolus-api-gideon.fly.dev)
-- GenLayer StudioNet contract: [`0xDc11B65794fe7070e1D1357D00d4bCFBa70F7C86`](https://explorer-studio.genlayer.com/address/0xDc11B65794fe7070e1D1357D00d4bCFBa70F7C86)
-- Base Sepolia escrow: [`0x7E5A3F917D5ab0Ce8CbAf11927BDe0830E58924F`](https://sepolia.basescan.org/address/0x7E5A3F917D5ab0Ce8CbAf11927BDe0830E58924F)
+- GenLayer StudioNet contract: [`0xd7D13F11E636A57333075e1b4e9BCD276b57a44C`](https://explorer-studio.genlayer.com/address/0xd7D13F11E636A57333075e1b4e9BCD276b57a44C)
+- Base Sepolia escrow: [`0xBb2a81ffD5a236715f24272f32947501F33D3BF0`](https://sepolia.basescan.org/address/0xBb2a81ffD5a236715f24272f32947501F33D3BF0)
 - Base Sepolia USDC: [`0x036CbD53842c5426634e7929541eC2318f3dCF7e`](https://sepolia.basescan.org/address/0x036CbD53842c5426634e7929541eC2318f3dCF7e)
 
-The deployed pair has completed a funded public-chain end-to-end test: 0.10 test USDC
-was deposited by the grantor, attested on finalized StudioNet state, adjudicated from
-archived Carter Center evidence, independently authorized and allocated on Base
-Sepolia, then withdrawn by a distinct beneficiary wallet. Exact transaction links,
-balance deltas, and verification details are recorded in
-[`docs/SECURITY_REMEDIATION.md`](docs/SECURITY_REMEDIATION.md).
+The current deployed pair completed a funded six-role public-chain end-to-end test.
+The grantor, claimant, contester, beneficiary, relayer, and independent authorizer
+were distinct; 0.12 test USDC entered escrow as principal and bonds, StudioNet
+finalized a consensus-backed `CONFIRMED` ruling, Base allocated three individually
+replay-protected entitlements, and both recipients withdrew. Exact transaction links
+and balance deltas are in [`docs/SECURITY_REMEDIATION.md`](docs/SECURITY_REMEDIATION.md).
 
 The complete remediation change set starts at commit
 [`fa5a9e9`](https://github.com/zoefunds/Obolus/commit/fa5a9e9c55dce069969ec46e8cb95dd9b71fcebb);
@@ -246,9 +246,9 @@ that parameter has been removed from `create_vault`, `cancel_vault`,
 contracts/obolus.py                      the Intelligent Contract itself (GenVM/Python) — judgment only, value-free
 contracts/base/ObolusEscrow.sol          the real USDC custody/payout contract on Base Sepolia
 examples/estate_planner_example.py       a worked consumer contract integration
-tests/direct/                            84 direct-mode pytest tests on contracts/obolus.py
+tests/direct/                            86 direct-mode pytest tests on contracts/obolus.py
 backend/test/                            node --test coverage for relay, authorizer, and Solidity compilation
-contracts/base/test/                     7 executable Foundry escrow security and withdrawal tests
+contracts/base/test/                     8 executable Foundry escrow security and withdrawal tests
 scripts/deploy.mjs                       deploys the GenLayer contract via genlayer-js
 contracts/base/deploy.js                 deploys ObolusEscrow.sol to Base Sepolia
 backend/                                 Express API, relayer fallback, and Base Sepolia payment relay
@@ -353,9 +353,9 @@ npm install
 # Contract
 genvm-lint check contracts/obolus.py --json
 pip install -r requirements.txt
-pytest tests/direct/ -v          # 84 direct-mode tests
-npm test --workspace backend     # 19 relay/authorizer/finality/Solidity tests
-forge test -vv                   # 7 executable escrow security/withdrawal tests
+pytest tests/direct/ -v          # 86 direct-mode tests
+npm test --workspace backend     # 28 relay/authorizer/refund/finality/Solidity tests
+forge test -vv                   # 8 executable escrow security/withdrawal tests
 
 # Configure
 cp .env.example .env
@@ -496,7 +496,8 @@ with `get_contests_for_claim` / `GET /claims/:id/contests`.
 | `POST /vaults` | `{ beneficiary, subjectName, subjectAkaJson, subjectBirthYear, contestWindowSeconds }` | `create_vault` (metadata only — vault starts at balance 0) |
 | `GET /vaults/:id/escrow-fund-calldata?amountUsdc=N` | | none — returns `approve` + `fundVault` calldata for the wallet to send on Base Sepolia |
 | `POST /vaults/:id/confirm-payment` | `{ txHash }` (of the Base Sepolia deposit) | `record_payment`, after reading the confirmed `Deposited` event itself |
-| `POST /vaults/:id/refund-failed-payment-calldata` | `{ txHash, paymentId }` | finalizes `void_payment_for_refund`, then returns payer-only Base refund calldata with independent authorization |
+| `GET /vaults/:id/refund-intent?txHash=...&paymentId=...` | | read-only exact EIP-191 message for the original Base payer to sign |
+| `POST /vaults/:id/refund-failed-payment-calldata` | `{ txHash, paymentId, payerSignature }` | verifies the original payer, passes independent read-only eligibility preflight, finalizes `void_payment_for_refund`, then returns payer-only Base refund calldata |
 | `POST /vaults/:id/fund` | `{ paymentId }` | `fund_vault` |
 | `POST /vaults/:id/beneficiary` | `{ newBeneficiary }` | `set_beneficiary` |
 | `POST /vaults/:id/cancel` | | `cancel_vault` (+ auto-relays any resulting settlement) |

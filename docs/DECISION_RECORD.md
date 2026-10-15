@@ -8,9 +8,11 @@ holds and transfers real test USDC. Settlement requires both the relay transacti
 an independent authorizer signature derived from finalized GenLayer state. Individual
 entitlements are replay-protected, delivery is reconciled from Base state, failed
 unconsumed deposits have a payer-only authorized refund path, and beneficiaries use
-pull withdrawals. A funded public-chain E2E has exercised deposit, attestation,
-adjudication, authorization, allocation, and withdrawal. Current addresses, transaction
-proofs, test totals, and remaining external CI limitation are maintained in
+pull withdrawals. The corrected deployment's six-role funded public-chain E2E
+exercised deposit, payment attestation, bonded claim and contest, consensus-backed
+adjudication, independent authorization, allocation, replay reconciliation, and both
+recipient withdrawals. Current addresses, transaction proofs, test totals, and the
+remaining external CI limitation are maintained in
 [`SECURITY_REMEDIATION.md`](SECURITY_REMEDIATION.md).
 
 ## Candidates generated (12+, spanning capability areas)

@@ -22,6 +22,8 @@ artifacts/
 cache/
 .e2e-funded-state.json
 .e2e-beneficiary-key
+.e2e-adversarial-state.json
+.e2e-adversarial-keys.json
 
 # Logs
 *.log

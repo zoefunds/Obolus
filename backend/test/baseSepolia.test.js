@@ -14,6 +14,7 @@ import { OBOLUS_ESCROW_ABI } from "../src/lib/escrowAbi.js";
 import {
   deriveSettlementId,
   findConfirmedDeposit,
+  latestSettlementDeliveryHash,
   readAllSettlementCandidates,
   refundIntentMessage,
   relaySettlementsToEscrow,
@@ -70,6 +71,22 @@ test("deriveSettlementId differs across vaults and settlement sets", () => {
   const c = deriveSettlementId(5, [1, 3]);
   assert.notEqual(a, b);
   assert.notEqual(a, c);
+});
+
+test("settlement delivery lookup respects Base's 200-block log range", async () => {
+  const ranges = [];
+  const contract = {
+    runner: { provider: { getBlockNumber: async () => 1500 } },
+    queryFilter: async (_filter, from, to) => {
+      ranges.push([from, to]);
+      if (from <= 1250 && to >= 1250) return [{ transactionHash: `0x${"77".repeat(32)}` }];
+      return [];
+    },
+  };
+  const hash = await latestSettlementDeliveryHash(contract, {}, 1000);
+  assert.equal(hash, `0x${"77".repeat(32)}`);
+  assert.ok(ranges.every(([from, to]) => to - from + 1 <= 200));
+  assert.deepEqual(ranges, [[1301, 1500], [1101, 1300]]);
 });
 
 test("failed-payment refund intent must be signed by the original payer", async () => {

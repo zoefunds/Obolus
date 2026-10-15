@@ -35,14 +35,43 @@ with a live branch comparison at
   including when no Payment row exists, preventing a pending or later payment
   attestation from reviving refunded value.
 
+## Follow-up review corrections
+
+- Failed-payment recovery now requires an EIP-191 intent from the original Base
+  payer before any mutation. The independent authorizer performs a read-only
+  preflight before the finalized tombstone; interrupted final authorization is
+  safely retryable.
+- The authorizer independently reads complete `latest-final` entitlement state,
+  the finalized vault and beneficiary/grantor, and the Base deposited/allocated
+  pool before deriving—not accepting—a ruling hash and signing exact recipients,
+  amounts, and individual replay identifiers.
+- Base settlement rejects a duplicate entitlement identifier inside the same
+  correctly signed batch, before any allocation is written.
+- Decision-critical URLs are restricted to sources fetched successfully in that
+  validator execution. A later challenger image is rejected before bond
+  consumption when the single GenVM challenger-image slot is already occupied;
+  later contesters can still submit archived page/text evidence.
+- Corrected contracts were redeployed at the addresses in
+  [`docs/SECURITY_REMEDIATION.md`](docs/SECURITY_REMEDIATION.md); exact StudioNet
+  source and masked Base runtime equivalence are machine-verified.
+
 ## Verification
 
-- `python3 -m pytest -q tests/direct`: 84 passed.
-- `npm test --prefix backend`: 19 passed, including Solidity compilation.
-- `forge test -vv`: 7 passed, including refund and beneficiary token transfers.
+- `python3 -m pytest -q tests/direct`: 86 passed.
+- `npm test --prefix backend`: 28 passed, including Solidity compilation and
+  bounded Base event reconciliation for public-RPC log limits.
+- `forge test -vv`: 8 passed, including same-batch duplicate rejection,
+  refund, and beneficiary token transfers.
 - `npm run build --prefix frontend`: production build passed.
 - API, independent authorizer, and frontend production deployments are live.
-- A funded public-chain E2E completed on vault 3 / claim 1: the payer deposited
+- The corrected deployment's six-role funded E2E completed on vault 1 / claim 1:
+  120,000 total USDC units entered escrow, the bonded contest was considered,
+  StudioNet finalized `CONFIRMED`, the independent authorizer approved three exact
+  entitlements, replay produced no second Base allocation, the beneficiary withdrew
+  110,000 units, and the claimant withdrew 10,000 units. Public references and
+  final balances are recorded in the remediation document.
+- A historical funded public-chain E2E completed on the superseded deployment's
+  vault 3 / claim 1: the payer deposited
   0.10 test USDC, StudioNet finalized a consensus-backed `CONFIRMED` ruling,
   the independent authorizer approved the exact entitlement, and the beneficiary
   withdrew the full 0.10 USDC. The public transaction links and balance deltas

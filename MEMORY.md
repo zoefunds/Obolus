@@ -7,8 +7,8 @@ addresses and obsolete interfaces were removed to avoid accidental reuse.
 
 - Frontend: <https://obolus-app.vercel.app>
 - Relay API: <https://obolus-api-gideon.fly.dev>
-- GenLayer StudioNet: `0xDc11B65794fe7070e1D1357D00d4bCFBa70F7C86`
-- Base Sepolia escrow: `0x7E5A3F917D5ab0Ce8CbAf11927BDe0830E58924F`
+- GenLayer StudioNet: `0xd7D13F11E636A57333075e1b4e9BCD276b57a44C`
+- Base Sepolia escrow: `0xBb2a81ffD5a236715f24272f32947501F33D3BF0`
 - Base Sepolia USDC: `0x036CbD53842c5426634e7929541eC2318f3dCF7e`
 - Relay/deployer: `0x7401c129EDfc26E68FE19309fE461eb3Db1058Eb`
 - Independent authorizer: `0x53f8FEa098d9Bc98BE890089BCB0CbE6BD45e3B8`
@@ -29,6 +29,10 @@ transactions, trust boundaries, and release verification.
 - Settlement replay protection is per entitlement, not per batch.
 - A failed-deposit refund requires a finalized GenLayer tombstone before the
   authorizer signs Base calldata.
+- Before that tombstone, the API verifies an EIP-191 intent signed by the
+  original Base payer and obtains an independent read-only eligibility preflight.
+  A failed preflight cannot invalidate a payment; a post-tombstone interruption
+  is retryable without a second mutation.
 - Beneficiaries withdraw with the Base pull-payment `claim` path.
 - Signing keys and bearer tokens belong in platform secret stores, never source.
 
@@ -40,11 +44,11 @@ transactions, trust boundaries, and release verification.
    addresses; the deploy script records address and block in local `.env`.
 4. Update both Fly apps to the exact same GenLayer and Base addresses.
 5. Deploy the API and authorizer images, then verify health checks.
-6. Deploy the frontend and verify `/platform/network` through the production
+6. Deploy the frontend and verify `/api/platform/network` through the production
    rewrite.
 7. Update README and the security remediation record with real explorer links.
 
-## Funded production E2E
+## Historical funded E2E on the superseded deployment
 
 Vault 3 / claim 1 completed the entire public-chain lifecycle on 2026-10-14.
 The payer deposited 100,000 USDC base units, the finalized GenLayer verdict was
@@ -52,6 +56,13 @@ The payer deposited 100,000 USDC base units, the finalized GenLayer verdict was
 distinct beneficiary withdrew all 100,000 units. The escrow has zero token balance
 and zero remaining beneficiary credit; its vault pool records 100,000 deposited and
 100,000 allocated. Exact immutable links are in
+[`docs/SECURITY_REMEDIATION.md`](docs/SECURITY_REMEDIATION.md).
+
+The current corrected deployment completed its six-role funded E2E on 2026-10-15.
+Vault 1 / claim 1 deposited 120,000 total units, finalized `DECEASED` / `HIGH` /
+`CONFIRMED`, allocated all three entitlements once, paid 110,000 units to the
+beneficiary and returned the 10,000-unit claimant bond, and ended with zero escrow
+balance and zero outstanding credits. Exact immutable links are in
 [`docs/SECURITY_REMEDIATION.md`](docs/SECURITY_REMEDIATION.md).
 
 The remediation history begins at

@@ -48,6 +48,23 @@ function getReadContract() {
   return new ethers.Contract(ESCROW_ADDRESS, OBOLUS_ESCROW_ABI, getProvider());
 }
 
+export async function latestSettlementDeliveryHash(contract, filter, deployBlock = ESCROW_DEPLOY_BLOCK) {
+  const blockProvider = contract.runner?.provider || contract.runner;
+  if (!deployBlock || !blockProvider?.getBlockNumber) {
+    const logs = await contract.queryFilter(filter, deployBlock, "latest");
+    return logs.at(-1)?.transactionHash || null;
+  }
+  // Base's public RPC limits eth_getLogs to 200 blocks. Search newest-first so
+  // a delivered entitlement normally resolves in one bounded request.
+  const latest = await blockProvider.getBlockNumber();
+  for (let to = latest; to >= deployBlock; to -= 200) {
+    const from = Math.max(deployBlock, to - 199);
+    const logs = await contract.queryFilter(filter, from, to);
+    if (logs.length) return logs.at(-1).transactionHash;
+  }
+  return null;
+}
+
 /** GenLayer vault ids are small integers; the escrow contract keys pools
  * by bytes32, so pad the id deterministically the same way on both the
  * backend and the frontend. */
@@ -138,7 +155,9 @@ export function verifyRefundIntent(deposit, { vaultId, txHash, paymentId, payerS
     payerSignature,
   );
   if (recovered.toLowerCase() !== deposit.payer.toLowerCase()) {
-    throw new Error("refund authorization was not signed by the original payer");
+    const error = new Error("refund authorization was not signed by the original payer");
+    error.status = 403;
+    throw error;
   }
   return recovered;
 }
@@ -223,11 +242,10 @@ export async function relaySettlementsToEscrow(
     if (!contract.filters?.SettlementApplied || !contract.queryFilter) {
       throw new Error(`cannot verify applied settlement ${ids[i]} without Base event access`);
     }
-    const logs = await contract.queryFilter(
-      contract.filters.SettlementApplied(settlementIds[i]), ESCROW_DEPLOY_BLOCK, "latest",
+    const txHash = await latestSettlementDeliveryHash(
+      contract, contract.filters.SettlementApplied(settlementIds[i]),
     );
-    if (logs.length === 0) throw new Error(`applied settlement ${ids[i]} has no delivery event`);
-    const txHash = logs[logs.length - 1].transactionHash;
+    if (!txHash) throw new Error(`applied settlement ${ids[i]} has no delivery event`);
     appliedGroups.set(txHash, [...(appliedGroups.get(txHash) || []), ids[i]]);
   }
   for (const [txHash, deliveredIds] of appliedGroups) acknowledgments.push({ txHash, ids: deliveredIds });
